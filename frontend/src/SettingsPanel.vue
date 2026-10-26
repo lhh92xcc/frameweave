@@ -204,7 +204,8 @@ onMounted(load);
         <p>把自己的网页额度和云模型连进来。选好策略，剩下的交给流程。</p>
       </div>
       <a
-        :href="health.gateway_console_url || 'http://127.0.0.1:8766'"
+        :href="health.gateway_console_url"
+        :aria-disabled="!health.gateway_console_url"
         target="_blank"
         rel="noopener"
         class="btn secondary"
@@ -517,7 +518,8 @@ onMounted(load);
         <Icon name="external" /><span
           >上游新增的连接器会自动出现在这里。浏览器扩展、自定义网页平台、复杂账号配置，可在
           <a
-            :href="health.gateway_console_url || 'http://127.0.0.1:8766'"
+            :href="health.gateway_console_url"
+            :aria-disabled="!health.gateway_console_url"
             target="_blank"
             rel="noopener"
             >Web2API 扩展控制台</a
