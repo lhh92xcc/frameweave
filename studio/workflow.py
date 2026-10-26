@@ -9,6 +9,7 @@ import zipfile
 from pydantic import BaseModel, Field, ValidationError
 
 from studio.catalog import baseline_contract
+from studio.cloud_storage import CloudStorageError, CosStorage
 from studio.models import Asset, ProductionPlan, ProjectCreate, Shot
 from studio.providers import ProviderFailure
 from studio.store import Conflict, digest, now, uid
@@ -43,6 +44,7 @@ class ShotResponse(BaseModel):
 class Workflow:
     def __init__(self, store, settings, providers):
         self.store, self.settings, self.providers = store, settings, providers
+        self.cloud = CosStorage(store.root)
         self.runner = None
         self.wake = asyncio.Event()
         self.stopping = False
@@ -602,7 +604,6 @@ class Workflow:
             instruction = f"生成本镜起始关键帧，严格使用实际上传参考图的主体身份、场景与道具；不要更换人物。\n{entity['image_prompt']}\n本镜内容：{entity['description']}"
         else:
             instruction = f"从已批准首帧生成真实动态视频，保持身份与空间连续。时长 {entity['duration']} 秒。\n{entity['video_prompt']}\n对白：{entity['dialogue']}\n旁白：{entity['narration']}"
-        refs = [self.store.media / self.store.artifact(id_)["file"] for id_ in s["dependencies"]]
         prompt = self.prompt(
             s,
             instruction
@@ -618,19 +619,32 @@ class Workflow:
         job["effective_prompt"] = prompt
         self.store.save_job(job)
         artifact_id = uid("art")
-        result = await self.providers.generate(
-            "video" if stage == "video" else "image",
-            job,
-            prompt,
-            refs,
-            entity.get("duration", 5),
-            s["aspect_ratio"],
-            artifact_id,
-        )
+        async with self.cloud.materialized(
+            self.store, [self.store.artifact(id_) for id_ in s["dependencies"]]
+        ) as refs:
+            result = await self.providers.generate(
+                "video" if stage == "video" else "image",
+                job,
+                prompt,
+                refs,
+                entity.get("duration", 5),
+                s["aspect_ratio"],
+                artifact_id,
+            )
         self.assert_current(job)
         if stage == "video" and result["metadata"]["duration_seconds"] + 0.15 < entity["duration"]:
             result["metadata"]["duration_warning"] = "输出短于分镜要求，需重新生成或修改分镜，合成会阻止放行"
-        self.save_output(job, artifact_id, result)
+        await self.backup_output(job, self.save_output(job, artifact_id, result))
+
+    async def backup_output(self, job, artifact):
+        config = self.cloud.get()
+        if config.enabled and config.auto_upload:
+            try:
+                return await asyncio.to_thread(self.cloud.backup_artifact, self.store, artifact)
+            except CloudStorageError as exc:
+                # A backup failure must never resubmit an already successful model job.
+                self.store.event(job["id"], f"生成结果已保留本地，COS 备份待重试：{exc}")
+        return artifact
 
     def save_output(self, job, artifact_id, result):
         s = job["snapshot"]
@@ -722,7 +736,7 @@ class Workflow:
         else:
             raise ValueError("请在设置中启用独立配音")
         self.assert_current(job)
-        self.save_output(job, artifact_id, result)
+        await self.backup_output(job, self.save_output(job, artifact_id, result))
 
     async def render(self, job):
         s, episode = job["snapshot"], job["snapshot"]["entity"]
@@ -752,18 +766,28 @@ class Workflow:
                 }
             )
         artifact_id = uid("art")
-        result = await self.providers.engine_request(
-            "/render",
-            {
-                "clips": clips,
-                "output": artifact_id + ".mp4",
-                "aspect_ratio": s["aspect_ratio"],
-                "subtitles": s["subtitles"],
-                "preserve_audio": s["audio_mode"] == "native",
-            },
-        )
+        dependencies = [self.store.artifact(id_) for id_ in s["dependencies"]]
+        async with self.cloud.materialized(self.store, dependencies) as paths:
+            mapping = {
+                a["file"]: path.relative_to(self.store.media).as_posix()
+                for a, path in zip(dependencies, paths)
+            }
+            for clip in clips:
+                clip["file"] = mapping[clip["file"]]
+                if clip["audio"]:
+                    clip["audio"] = mapping[clip["audio"]]
+            result = await self.providers.engine_request(
+                "/render",
+                {
+                    "clips": clips,
+                    "output": artifact_id + ".mp4",
+                    "aspect_ratio": s["aspect_ratio"],
+                    "subtitles": s["subtitles"],
+                    "preserve_audio": s["audio_mode"] == "native",
+                },
+            )
         self.assert_current(job)
-        self.save_output(
+        artifact = self.save_output(
             job,
             artifact_id,
             {
@@ -772,6 +796,7 @@ class Workflow:
                 "route": {"provider": "ai-video-generation", "model": "ffmpeg", "paid": False},
             },
         )
+        await self.backup_output(job, artifact)
 
     def export(self, project_id, target=None, include_history=False):
         from studio.archive_curation import library_primary
@@ -790,14 +815,13 @@ class Workflow:
             z.writestr("artifacts.json", json.dumps(artifacts, ensure_ascii=False, indent=2))
             written = set()
             for artifact in artifacts:
-                file = self.store.media / artifact["file"]
-                if file.is_file() and file.name not in written:
-                    z.write(file, "media/" + file.name)
-                    written.add(file.name)
-                if artifact.get("subtitle_file") and (self.store.media / artifact["subtitle_file"]).is_file():
-                    z.write(
-                        self.store.media / artifact["subtitle_file"], "subtitles/" + artifact["subtitle_file"]
-                    )
+                if artifact["file"] not in written:
+                    with self.cloud.materialize(self.store, artifact) as file:
+                        z.write(file, "media/" + file.name)
+                    written.add(artifact["file"])
+                if artifact.get("subtitle_file"):
+                    with self.cloud.materialize(self.store, artifact, "subtitle_file") as subtitle:
+                        z.write(subtitle, "subtitles/" + subtitle.name)
             import_dir = self.store.root / "imports" / project_id
             if import_dir.is_dir():
                 for file in import_dir.rglob("*"):

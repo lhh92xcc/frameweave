@@ -80,6 +80,14 @@ async function prompt() {
               : statusText[artifact.review])
         }}</span>
         <dl class="metadata-list">
+          <template v-if="artifact.storage">
+            <dt>素材存储</dt>
+            <dd>腾讯云 COS · 已完整读回校验</dd>
+            <dt>COS 位置</dt>
+            <dd class="archive-path">
+              {{ artifact.storage.bucket }} / {{ artifact.storage.key }}
+            </dd>
+          </template>
           <template v-if="artifact.metadata?.curation">
             <dt>当前用途</dt>
             <dd>
@@ -211,7 +219,7 @@ async function prompt() {
           >
             需要返工</button
           ><a
-            :href="artifact.url"
+            :href="artifact.url + '?download=true'"
             :download="artifact.title || artifact.entity_id"
             class="icon-btn"
             title="下载原始素材"

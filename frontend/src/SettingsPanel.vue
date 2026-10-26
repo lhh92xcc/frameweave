@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import Icon from "./Icon.vue";
+import CloudStoragePanel from "./CloudStoragePanel.vue";
 import { api } from "./api";
 const emit = defineEmits<{ notify: [message: string] }>();
 const settings = ref<any>(null),
@@ -217,6 +218,7 @@ onMounted(load);
         v-for="t in [
           { id: 'routing', name: '生成策略', icon: 'layers' },
           { id: 'connections', name: '账号与连接', icon: 'link' },
+          { id: 'storage', name: '云端存储', icon: 'folder' },
           { id: 'runtime', name: '服务与更新', icon: 'settings' },
         ]"
         :key="t.id"
@@ -229,6 +231,10 @@ onMounted(load);
     <div v-if="error" class="inline-error" role="alert">
       <Icon name="warning" :size="17" />{{ error }}
     </div>
+    <CloudStoragePanel
+      v-if="tab === 'storage'"
+      @notify="emit('notify', $event)"
+    />
     <template v-if="tab === 'routing' && settings"
       ><section class="policy-card">
         <span class="policy-icon"><Icon name="spark" :size="25" /></span>

@@ -193,13 +193,9 @@ onMounted(load);
       <div>
         <strong>当前制作素材：选定参考与待复核候选</strong>
         <p>
-          当前 {{ scopeCounts.current }} 份：{{
-            scopeCounts.reference
-          }}
+          当前 {{ scopeCounts.current }} 份：{{ scopeCounts.reference }}
           份选定参考、
-          {{
-            scopeCounts.candidate
-          }}
+          {{ scopeCounts.candidate }}
           份待复核候选。待复核不等于废弃，也不等于制作批准；
           {{ scopeCounts.repair }} 份明确返修另列，旧试片与历史文件分开保存。
         </p>
@@ -342,6 +338,9 @@ onMounted(load);
             {{ a.metadata?.curation?.display_title || a.title || a.entity_id }}
           </h3>
           <p>{{ a.project_title }} · {{ stageText[a.kind] }}</p>
+          <span v-if="a.storage" class="muted small"
+            >腾讯云 COS · 原文件已校验</span
+          >
           <span class="muted small" v-if="a.archived"
             >{{ a.metadata?.curation?.purpose || a.metadata?.imported?.group }}
             ·

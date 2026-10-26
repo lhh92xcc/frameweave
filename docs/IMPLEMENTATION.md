@@ -26,3 +26,5 @@ Unified local image/video production studio, Chinese UI, six workflow templates,
 No real external model output or quality claim will be inferred from mocked tests. User supplies model credentials in Settings.
 
 Curated archives keep current candidates visible alongside selected references. Pending QC is separate from exclusion: default gallery, project counters and exports include both states without changing approvals. Repairs, old tests and historical files remain separate; episode filters show generated, pending, repair and missing counts.
+
+COS is an independent storage adapter in `studio/cloud_storage.py`, with private credentials, explicit resumable selection migration, full-download SHA-256 verification and cloud preview redirects. Production dependencies and ZIP exports can temporarily materialize remote-only files. Uploads retain local copies and original approvals; backup failures never resubmit generation. Automatic backup is opt-in and applies to all projects.

@@ -79,6 +79,15 @@ export interface Artifact {
   archived?: boolean;
   title?: string;
   thumbnail_url?: string;
+  storage?: {
+    backend: "cos";
+    bucket: string;
+    region: string;
+    key: string;
+    sha256: string;
+    size: number;
+    verified_at: number;
+  };
 }
 export interface Job {
   id: string;

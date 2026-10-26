@@ -23,6 +23,8 @@
 | `GET /api/artifacts` | 所有项目素材及过期状态 |
 | `GET /api/artifacts/{id}/content` | 图片、视频、音频原始文件 |
 | `GET /api/artifacts/{id}/thumbnail` | 历史图片的小尺寸预览 |
+| `GET /api/storage`、`PUT /api/storage` | COS 配置（凭据不回显）、迁移数量与本地副本统计 |
+| `POST /api/storage/test` | 小对象上传/读回与生命周期规则只读检查 |
 | `POST /api/artifacts/{id}/review` | `{approved, note}`；旧版本不可批准 |
 | `GET/PUT /api/settings` | 模型渠道、付费开关、声音与字幕 |
 | `GET /api/gateway/catalog` | 上游当前连接器目录 |
@@ -38,3 +40,5 @@
 本机历史迁移另有只读任务阶段 `archive`。素材的 `archived`、`title`、`thumbnail_url` 与 `metadata.imported` 用于历史浏览，原始审核结论单独保存，不允许通过审核接口将档案直接批准为生产素材。项目 `import_summary` 记录数量、来源分组和文件校验异常；迁移步骤见 [IMPORT.md](IMPORT.md)。素材的 `metadata.curation` 记录当前用途、选择依据和分集镜号，项目 `library_curation` 与 `reference_catalog` 提供用途计数及分集缺口。已整理项目的默认 ZIP 包含 `reference` 选定参考、`candidate` 待复核候选与当前制作资料，原审核状态保留；排除明确返修、旧试片和历史文件。`include_history=true` 显式包含完整历史档案。未整理项目保留完整迁移导出。使用磁盘临时文件响应。
 
 通用应用错误：`{error:{code,message}}`；404 为缺失，409 为版本冲突，422 为输入或前置条件问题，503 为供应商/服务不可用。HTTP Schema 校验错误由 FastAPI 的 `detail` 返回。供应商原始鉴权响应不会写入工作台错误正文。所有运行数据与凭据禁止提交 Git。
+
+COS 素材 `content` / `thumbnail` 在启用后返回 307，目标是短时签名的官方 COS HTTPS 地址；本地索引仅保存对象位置与校验信息。存储错误返回 503 `COS_STORAGE_ERROR`，不回显 SDK 原始请求、签名或凭据。见 [CLOUD_STORAGE.md](CLOUD_STORAGE.md)。

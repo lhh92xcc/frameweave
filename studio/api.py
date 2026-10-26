@@ -12,12 +12,13 @@ from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from studio.catalog import TEMPLATES
+from studio.cloud_storage import CloudStorageError, CosSettings
 from studio.models import (
     ContractEdit,
     PlanEdit,
@@ -51,6 +52,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
 
     app = FastAPI(title="FrameWeave · 镜织工坊", version="0.1.0", lifespan=lifespan)
     app.state.workflow, app.state.store, app.state.providers = workflow, store, providers
+    app.state.cloud = workflow.cloud
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 
     @app.middleware("http")
@@ -97,6 +99,10 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     @app.exception_handler(ProviderFailure)
     async def provider_error(request, exc):
         return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=503)
+
+    @app.exception_handler(CloudStorageError)
+    async def storage_error(request, exc):
+        return JSONResponse({"error": {"code": "COS_STORAGE_ERROR", "message": str(exc)}}, status_code=503)
 
     @app.get("/api/health")
     async def health():
@@ -299,6 +305,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                     "route": {"provider": "user-upload", "model": "original", "paid": False},
                 },
             )
+            result = await workflow.backup_output(job, result)
             workflow.wake.set()
             return result
         except Exception:
@@ -320,8 +327,30 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         return workflow.review(artifact_id, body.approved, body.note)
 
     @app.get("/api/artifacts/{artifact_id}/content")
-    async def media(artifact_id: str):
+    async def media(artifact_id: str, download: bool = False):
         a = store.artifact(artifact_id)
+        if a.get("storage") and workflow.cloud.get().enabled:
+            if a["mime"] == "image/svg+xml":
+
+                def read_svg():
+                    with workflow.cloud.materialize(store, a) as source:
+                        return source.read_bytes()
+
+                return Response(
+                    await asyncio.to_thread(read_svg),
+                    media_type=a["mime"],
+                    headers={
+                        "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'"
+                    },
+                )
+            return RedirectResponse(
+                await asyncio.to_thread(
+                    workflow.cloud.signed_url,
+                    a["storage"],
+                    (a.get("title") or a["file"]) if download else None,
+                ),
+                status_code=307,
+            )
         path = (store.media / a["file"]).resolve()
         if not path.is_relative_to(store.media) or not path.is_file():
             raise HTTPException(404)
@@ -330,11 +359,20 @@ def create_app(data_dir=None, start_worker=True, transport=None):
             if a["mime"] == "image/svg+xml"
             else None
         )
-        return FileResponse(path, media_type=a["mime"], headers=headers)
+        return FileResponse(
+            path,
+            media_type=a["mime"],
+            headers=headers,
+            filename=(a.get("title") or path.name) if download else None,
+        )
 
     @app.get("/api/artifacts/{artifact_id}/thumbnail")
     async def thumbnail(artifact_id: str):
         a = store.artifact(artifact_id)
+        if a.get("thumbnail_storage") and workflow.cloud.get().enabled:
+            return RedirectResponse(
+                await asyncio.to_thread(workflow.cloud.signed_url, a["thumbnail_storage"]), status_code=307
+            )
         path = (store.root / a.get("thumbnail", "missing")).resolve()
         if not path.is_relative_to(store.root / "thumbnails") or not path.is_file():
             raise HTTPException(404)
@@ -366,6 +404,29 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     @app.put("/api/settings")
     async def save_settings(body: RoutingSettings):
         return settings.save(body)
+
+    @app.get("/api/storage")
+    async def storage_settings():
+        rows = [a for a in store.artifacts() if a.get("storage")]
+        return {
+            **workflow.cloud.public(workflow.cloud.get()),
+            "usage": {
+                "originals": len(rows),
+                "bytes": sum(a["storage"]["size"] for a in rows),
+                "thumbnails": sum(bool(a.get("thumbnail_storage")) for a in rows),
+                "local_copies": sum((store.media / a["file"]).is_file() for a in rows),
+            },
+        }
+
+    @app.put("/api/storage")
+    async def save_storage_settings(body: CosSettings):
+        workflow.cloud.save(body)
+        return await storage_settings()
+
+    @app.post("/api/storage/test")
+    async def test_storage():
+        result = await asyncio.to_thread(workflow.cloud.probe)
+        return {**result, "lifecycle": await asyncio.to_thread(workflow.cloud.lifecycle)}
 
     @app.get("/api/gateway/catalog")
     async def catalog():
