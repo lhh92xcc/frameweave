@@ -7,7 +7,8 @@ export default defineConfig({
   expect: { timeout: 12000 },
   use: { baseURL: "http://127.0.0.1:8787", trace: "retain-on-failure" },
   webServer: {
-    command: "FRAMEWEAVE_DATA=../.local/e2e python3 ../scripts/dev.py serve",
+    command:
+      "FRAMEWEAVE_GATEWAY_PORT=18866 FRAMEWEAVE_DATA=../.local/e2e python3 ../scripts/dev.py serve",
     url: "http://127.0.0.1:8787/api/health",
     reuseExistingServer: false,
     timeout: 60000,

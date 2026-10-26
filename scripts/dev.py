@@ -19,11 +19,26 @@ PIDFILE = DATA / "processes.json"
 
 def specs():
     bind = os.environ.get("FRAMEWEAVE_BIND", "127.0.0.1")
+    port_value = os.environ.get("FRAMEWEAVE_GATEWAY_PORT")
+    if port_value is None and (ROOT / ".env").is_file():
+        for line in (ROOT / ".env").read_text().splitlines():
+            if line.startswith("FRAMEWEAVE_GATEWAY_PORT="):
+                port_value = line.partition("=")[2].strip().strip("\"'")
+    gateway_port = int(port_value or "8766")
+    if not 1024 <= gateway_port <= 65535:
+        raise ValueError("FRAMEWEAVE_GATEWAY_PORT 必须为 1024–65535")
     ffmpeg_paths = [Path("/opt/homebrew/opt/ffmpeg-full/bin"), Path("/usr/local/opt/ffmpeg-full/bin")]
     runtime_path = os.pathsep.join(
         [str(p) for p in ffmpeg_paths if p.is_dir()] + [os.environ.get("PATH", "")]
     )
-    env = dict(os.environ, FRAMEWEAVE_DATA=str(DATA), PYTHONUNBUFFERED="1", PATH=runtime_path)
+    env = dict(
+        os.environ,
+        FRAMEWEAVE_DATA=str(DATA),
+        PYTHONUNBUFFERED="1",
+        PATH=runtime_path,
+        FRAMEWEAVE_GATEWAY_PORT=str(gateway_port),
+        FRAMEWEAVE_GATEWAY=os.environ.get("FRAMEWEAVE_GATEWAY", f"http://127.0.0.1:{gateway_port}"),
+    )
     engine_env = dict(env, PYTHONPATH=str(ROOT / "upstream/ai-video-generation") + os.pathsep + str(ROOT))
     gateway_env = dict(
         env, WEB2API_STATE_DIR=str(DATA / "gateway/state"), WEB2API_IMAGES_DIR=str(DATA / "gateway/generated")
@@ -33,7 +48,7 @@ def specs():
             "gateway",
             Path(os.environ.get("FRAMEWEAVE_GATEWAY_PYTHON", ROOT / ".local/gateway-venv/bin/python")),
             "server:app",
-            8766,
+            gateway_port,
             ROOT / "upstream/web2api-web",
             gateway_env,
         ),
@@ -135,7 +150,7 @@ def start(foreground=False):
             time.sleep(0.3)
         else:
             raise RuntimeError("Services did not become ready. Inspect .local/logs/*.log")
-        print("FrameWeave: http://127.0.0.1:8787\nWeb2API: http://127.0.0.1:8766")
+        print(f"FrameWeave: http://127.0.0.1:8787\nWeb2API: http://127.0.0.1:{specifications[0][3]}")
         if foreground:
 
             def shutdown(signum, frame):

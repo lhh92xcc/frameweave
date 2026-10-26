@@ -64,15 +64,44 @@ async function prompt() {
       </div>
       <div class="media-detail-info">
         <div class="eyebrow">REVIEW & REFINE</div>
-        <h2>{{ artifact.title || artifact.entity_id }}</h2>
+        <h2>
+          {{
+            artifact.metadata?.curation?.display_title ||
+            artifact.title ||
+            artifact.entity_id
+          }}
+        </h2>
         <span :class="['badge', artifact.stale ? 'stale' : artifact.review]">{{
-          artifact.archived
+          artifact.metadata?.curation?.label ||
+          (artifact.archived
             ? "历史导入 · 用途待复核"
             : artifact.stale
               ? "已过期"
-              : statusText[artifact.review]
+              : statusText[artifact.review])
         }}</span>
         <dl class="metadata-list">
+          <template v-if="artifact.metadata?.curation">
+            <dt>当前用途</dt>
+            <dd>
+              {{
+                artifact.metadata.curation.purpose ||
+                artifact.metadata.curation.label
+              }}
+            </dd>
+            <dt>选择依据</dt>
+            <dd>{{ artifact.metadata.curation.reason }}</dd>
+            <dt v-if="artifact.metadata.curation.episode">新版镜号</dt>
+            <dd v-if="artifact.metadata.curation.episode">
+              {{
+                artifact.metadata.curation.shot_id ||
+                artifact.metadata.curation.episode
+              }}
+            </dd>
+            <dt>静帧 / 初筛</dt>
+            <dd>
+              {{ artifact.metadata.curation.static_qc || "未完成完整审核" }}
+            </dd>
+          </template>
           <template v-if="artifact.archived">
             <dt>原始路径</dt>
             <dd class="archive-path">
@@ -83,12 +112,18 @@ async function prompt() {
             <dt>原审核状态</dt>
             <dd>
               {{
-                artifact.metadata?.imported?.quality_status || "未记录，待复核"
+                artifact.metadata?.curation?.static_qc ||
+                artifact.metadata?.imported?.quality_status ||
+                "未记录，待复核"
               }}
             </dd>
             <dt>原制作审批</dt>
             <dd>
-              {{ artifact.metadata?.imported?.production_approval || "未记录" }}
+              {{
+                artifact.metadata?.curation?.production_approval ||
+                artifact.metadata?.imported?.production_approval ||
+                "未记录"
+              }}
             </dd>
             <dt>SHA-256</dt>
             <dd class="archive-path">
@@ -111,7 +146,7 @@ async function prompt() {
               artifact.plan_revision
             }}
           </dd>
-          <dt>生成时间</dt>
+          <dt>{{ artifact.archived ? "原文件时间" : "生成时间" }}</dt>
           <dd>{{ stamp(artifact.created_at) }}</dd>
           <template v-if="artifact.metadata?.width"
             ><dt>分辨率</dt>
@@ -190,7 +225,14 @@ async function prompt() {
         </button>
         <pre v-if="showPrompt" class="prompt-code">{{
           (artifact.archived
-            ? JSON.stringify(artifact.metadata?.imported, null, 2)
+            ? JSON.stringify(
+                {
+                  imported: artifact.metadata?.imported,
+                  curation: artifact.metadata?.curation,
+                },
+                null,
+                2,
+              )
             : job?.effective_prompt) ||
           JSON.stringify(job?.snapshot, null, 2) ||
           "读取中…"

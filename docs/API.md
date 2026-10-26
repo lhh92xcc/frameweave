@@ -35,6 +35,6 @@
 
 任务状态：`queued`、`running`、`succeeded`、`blocked`、`failed`、`cancelled`。素材审核：`pending`、`approved`、`rejected`；`stale` 是相对当前规范、分镜和引用版本计算的状态。执行成功不自动批准。
 
-本机历史迁移另有只读任务阶段 `archive`。素材的 `archived`、`title`、`thumbnail_url` 与 `metadata.imported` 用于历史浏览，原始审核结论单独保存，不允许通过审核接口将档案直接批准为生产素材。项目 `import_summary` 记录数量、来源分组和文件校验异常；迁移步骤见 [IMPORT.md](IMPORT.md)。项目 ZIP 包含迁移清单和制作文档，使用磁盘临时文件响应。
+本机历史迁移另有只读任务阶段 `archive`。素材的 `archived`、`title`、`thumbnail_url` 与 `metadata.imported` 用于历史浏览，原始审核结论单独保存，不允许通过审核接口将档案直接批准为生产素材。项目 `import_summary` 记录数量、来源分组和文件校验异常；迁移步骤见 [IMPORT.md](IMPORT.md)。素材的 `metadata.curation` 记录当前用途、选择依据和分集镜号，项目 `library_curation` 与 `reference_catalog` 提供用途计数及分集缺口。已整理项目的默认 ZIP 只打包当前参考与当前制作资料；`include_history=true` 显式包含历史档案。未整理项目保留完整迁移导出。使用磁盘临时文件响应。
 
 通用应用错误：`{error:{code,message}}`；404 为缺失，409 为版本冲突，422 为输入或前置条件问题，503 为供应商/服务不可用。HTTP Schema 校验错误由 FastAPI 的 `detail` 返回。供应商原始鉴权响应不会写入工作台错误正文。所有运行数据与凭据禁止提交 Git。

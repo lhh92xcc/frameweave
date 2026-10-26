@@ -4577,3 +4577,25 @@ code {
     padding: 9px 10px;
   }
 }
+
+.curation-summary {
+  margin-bottom: 18px;
+}
+.curation-summary p {
+  margin: 7px 0 0;
+  line-height: 1.7;
+}
+.curation-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.curation-tabs .btn {
+  padding: 9px 14px;
+  font-size: 12px;
+}
+.curation-tabs span {
+  opacity: 0.7;
+  margin-left: 6px;
+}

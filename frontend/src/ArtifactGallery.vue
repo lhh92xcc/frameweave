@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { api, statusText, stageText, type Artifact } from "./api";
+import {
+  api,
+  libraryPrimary,
+  statusText,
+  stageText,
+  type Artifact,
+  type Project,
+} from "./api";
 import Icon from "./Icon.vue";
 import MediaDetail from "./MediaDetail.vue";
 const emit = defineEmits<{ notify: [message: string] }>(),
@@ -9,11 +16,62 @@ const emit = defineEmits<{ notify: [message: string] }>(),
   includeOld = ref(false),
   detail = ref<Artifact | null>(null),
   error = ref("");
-const props = defineProps<{ initialProject?: string }>();
+const props = defineProps<{ initialProject?: string; projects?: Project[] }>();
 const projectFilter = ref(props.initialProject || ""),
   groupFilter = ref(""),
   query = ref(""),
   currentPage = ref(1);
+const scope = ref("reference"),
+  episodeFilter = ref("");
+const selectedProject = computed(() =>
+  props.projects?.find((p) => p.id === projectFilter.value),
+);
+const projectArtifacts = computed(() =>
+  artifacts.value.filter(
+    (a) => !projectFilter.value || a.project_id === projectFilter.value,
+  ),
+);
+const hasCuration = computed(() =>
+  projectArtifacts.value.some((a) => a.metadata?.curation),
+);
+const scopes = [
+  ["reference", "当前参考"],
+  ["candidate", "待复核候选"],
+  ["repair", "明确返修"],
+  ["test", "动作试片"],
+  ["history", "历史排除"],
+  ["all", "全部档案"],
+];
+const scopeCounts = computed(() =>
+  Object.fromEntries(
+    scopes.map(([key]) => [
+      key,
+      projectArtifacts.value.filter(
+        (a) =>
+          key === "all" ||
+          (key === "reference"
+            ? libraryPrimary(a)
+            : a.metadata?.curation?.state === key),
+      ).length,
+    ]),
+  ),
+);
+const episodes = computed(
+  () =>
+    selectedProject.value?.reference_catalog ||
+    [
+      ...new Set(
+        projectArtifacts.value
+          .map((a) => a.metadata?.curation?.episode)
+          .filter(Boolean),
+      ),
+    ]
+      .sort()
+      .map((id) => ({ id, title: id, generated: 0, missing_slots: [] })),
+);
+const episodeInfo = computed(() =>
+  episodes.value.find((e) => e.id === episodeFilter.value),
+);
 const pageSize = 32;
 const projects = computed(() => [
   ...new Map(
@@ -34,25 +92,40 @@ const groups = computed(
     ] as string[],
 );
 const filtered = computed(() =>
-  artifacts.value.filter(
-    (a) =>
-      (includeOld.value || !a.stale) &&
-      (filter.value === "all" || a.kind === filter.value) &&
-      (!projectFilter.value || a.project_id === projectFilter.value) &&
-      (!groupFilter.value ||
-        a.metadata?.imported?.group === groupFilter.value) &&
-      (!query.value ||
-        [
-          a.title,
-          a.entity_id,
-          a.project_title,
-          a.metadata?.imported?.source_path,
-          a.metadata?.imported?.shot_id,
-        ]
-          .join(" ")
-          .toLowerCase()
-          .includes(query.value.toLowerCase())),
-  ),
+  artifacts.value
+    .filter(
+      (a) =>
+        (includeOld.value || !a.stale) &&
+        (!hasCuration.value ||
+          scope.value === "all" ||
+          (scope.value === "reference"
+            ? libraryPrimary(a)
+            : a.metadata?.curation?.state === scope.value)) &&
+        (!episodeFilter.value ||
+          a.metadata?.curation?.episode === episodeFilter.value) &&
+        (filter.value === "all" || a.kind === filter.value) &&
+        (!projectFilter.value || a.project_id === projectFilter.value) &&
+        (!groupFilter.value ||
+          a.metadata?.imported?.group === groupFilter.value) &&
+        (!query.value ||
+          [
+            a.title,
+            a.entity_id,
+            a.project_title,
+            a.metadata?.imported?.source_path,
+            a.metadata?.imported?.shot_id,
+            a.metadata?.curation?.display_title,
+            a.metadata?.curation?.reason,
+          ]
+            .join(" ")
+            .toLowerCase()
+            .includes(query.value.toLowerCase())),
+    )
+    .sort(
+      (a, b) =>
+        (a.metadata?.curation?.order ?? 10000) -
+        (b.metadata?.curation?.order ?? 10000),
+    ),
 );
 const pageCount = computed(() =>
   Math.max(1, Math.ceil(filtered.value.length / pageSize)),
@@ -68,10 +141,13 @@ watch(
   (value) => (projectFilter.value = value || ""),
 );
 watch(
-  [filter, includeOld, projectFilter, groupFilter, query],
+  [filter, includeOld, projectFilter, groupFilter, query, scope, episodeFilter],
   () => (currentPage.value = 1),
 );
-watch(projectFilter, () => (groupFilter.value = ""));
+watch(projectFilter, () => {
+  groupFilter.value = "";
+  episodeFilter.value = "";
+});
 async function load() {
   try {
     artifacts.value = await api("/artifacts");
@@ -91,8 +167,37 @@ onMounted(load);
         <h1>让每一份素材，都有来处。</h1>
         <p>参考图、关键帧、视频与成片，按项目和规范版本留存。</p>
       </div>
-      <button class="btn secondary" @click="load">
-        <Icon name="refresh" :size="16" />刷新素材
+      <div class="button-row">
+        <a
+          v-if="selectedProject?.library_curation"
+          class="btn secondary"
+          :href="'/api/projects/' + projectFilter + '/export.zip'"
+          >下载当前参考</a
+        >
+        <button class="btn secondary" @click="load">
+          <Icon name="refresh" :size="16" />刷新素材
+        </button>
+      </div>
+    </div>
+    <div v-if="hasCuration" class="curation-summary notice">
+      <div>
+        <strong>按当前制作线整理，只展示选定参考</strong>
+        <p>
+          {{
+            selectedProject?.library_curation?.note ||
+            "待复核、明确返修和历史版本分开保存；当前参考不等于成片制作批准。"
+          }}
+        </p>
+      </div>
+    </div>
+    <div v-if="hasCuration" class="curation-tabs" aria-label="素材用途">
+      <button
+        v-for="[key, label] in scopes"
+        :key="key"
+        :class="['btn', scope === key ? 'primary' : 'secondary']"
+        @click="scope = key"
+      >
+        {{ label }} <span>{{ scopeCounts[key] }}</span>
       </button>
     </div>
     <div class="archive-filters">
@@ -101,6 +206,18 @@ onMounted(load);
           <option value="">全部项目</option>
           <option v-for="[id, title] in projects" :key="id" :value="id">
             {{ title }}
+          </option>
+        </select></label
+      >
+      <label v-if="episodes.length"
+        >集数<select v-model="episodeFilter" aria-label="按集数筛选素材">
+          <option value="">全部集数 / 人物场景基准</option>
+          <option
+            v-for="episode in episodes"
+            :key="episode.id"
+            :value="episode.id"
+          >
+            {{ episode.id }} · {{ episode.title }}
           </option>
         </select></label
       >
@@ -118,6 +235,13 @@ onMounted(load);
       /></label>
       <span class="muted">{{ filtered.length }} 份素材</span>
     </div>
+    <p v-if="episodeInfo" class="notice">
+      {{ episodeInfo.id }}：生成过 {{ episodeInfo.generated }} / 10 个镜头候选。
+      <span v-if="episodeInfo.missing_slots.length"
+        >未生成：{{ episodeInfo.missing_slots.join("、") }}。</span
+      >
+      当前列表只显示所选用途，返修和待复核不会计入当前参考。
+    </p>
     <div class="media-filters">
       <div class="segmented">
         <button
@@ -143,14 +267,25 @@ onMounted(load);
     <div v-if="error" class="inline-error">{{ error }}</div>
     <div v-if="!filtered.length" class="work-panel stage-empty">
       <Icon name="images" :size="36" />
-      <h3>每一份创作，都值得被留下。</h3>
-      <p>在项目中生成参考图或视频后，它们会自动收进这里。</p>
+      <h3>
+        {{ hasCuration ? "当前筛选下没有素材" : "每一份创作，都值得被留下。" }}
+      </h3>
+      <p>
+        {{
+          hasCuration
+            ? "可切换集数或用途查看；尚未生成和未完成审核的镜头不会冒充可用素材。"
+            : "在项目中生成参考图或视频后，它们会自动收进这里。"
+        }}
+      </p>
     </div>
     <div v-else class="media-grid">
       <article v-for="a in visible" :key="a.id" class="media-card">
         <button
           class="media-card-preview"
-          :aria-label="'预览 ' + (a.title || a.entity_id)"
+          :aria-label="
+            '预览 ' +
+            (a.metadata?.curation?.display_title || a.title || a.entity_id)
+          "
           @click="detail = a"
         >
           <img
@@ -166,21 +301,25 @@ onMounted(load);
           /><Icon v-else name="audio" :size="32" /><span
             :class="['media-review badge', a.stale ? 'stale' : a.review]"
             >{{
-              a.archived
+              a.metadata?.curation?.label ||
+              (a.archived
                 ? "历史导入"
                 : a.stale
                   ? "已过期"
-                  : statusText[a.review]
+                  : statusText[a.review])
             }}</span
           ><span class="media-preview-overlay"
             ><Icon name="eye" :size="26"
           /></span>
         </button>
         <div class="media-card-info">
-          <h3 :title="a.title || a.entity_id">{{ a.title || a.entity_id }}</h3>
+          <h3 :title="a.title || a.entity_id">
+            {{ a.metadata?.curation?.display_title || a.title || a.entity_id }}
+          </h3>
           <p>{{ a.project_title }} · {{ stageText[a.kind] }}</p>
           <span class="muted small" v-if="a.archived"
-            >{{ a.metadata?.imported?.group }} ·
+            >{{ a.metadata?.curation?.purpose || a.metadata?.imported?.group }}
+            ·
             {{
               a.metadata?.imported?.shot_id || a.metadata?.imported?.role
             }}</span

@@ -26,7 +26,7 @@ docker --context orbstack compose down
 
 停止服务后备份整个 `.local/`，其中包含数据库、原始媒体、云响应回执、网关账号配置与密钥。备份需按私有资料保护，不提交到 GitHub。恢复到同一项目的 `.local/` 后重新启动。`export.zip` 适合交付单项目内容与结果，不包含模型配置，也不能替代全量备份。
 
-修改本机路径可设置 `FRAMEWEAVE_DATA`；修改内部服务地址可设置 `FRAMEWEAVE_GATEWAY` 与 `FRAMEWEAVE_ENGINE`。端口固定以简化本地账号与扩展配置。开发前端：`cd frontend && npm run dev`，代理到 8787。
+修改本机路径可设置 `FRAMEWEAVE_DATA`；修改内部服务地址可设置 `FRAMEWEAVE_GATEWAY` 与 `FRAMEWEAVE_ENGINE`。网关端口默认 8766；若被其他项目占用，在本机忽略提交的 `.env` 写入 `FRAMEWEAVE_GATEWAY_PORT=8786` 后重启。OrbStack 只调整宿主机映射，容器内部保持 8766；原生启动器也读取这个端口字段。扩展控制台链接按实际配置显示，浏览器扩展的网关地址应相应调整。开发前端：`cd frontend && npm run dev`，代理到 8787。
 
 ## 任务恢复
 

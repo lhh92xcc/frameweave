@@ -130,4 +130,19 @@ export interface Project {
     note: string;
     groups: Record<string, number>;
   };
+  library_curation?: {
+    counts: Record<string, number>;
+    note: string;
+    original_total: number;
+  };
+  reference_catalog?: {
+    id: string;
+    title: string;
+    generated: number;
+    missing_slots: string[];
+  }[];
+}
+
+export function libraryPrimary(a: Artifact) {
+  return !a.metadata?.curation || a.metadata.curation.state === "reference";
 }

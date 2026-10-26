@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
-import { api, type Project, type Template } from "./api";
+import { api, libraryPrimary, type Project, type Template } from "./api";
 import Icon from "./Icon.vue";
 import CreateProject from "./CreateProject.vue";
 import ProjectWorkspace from "./ProjectWorkspace.vue";
@@ -45,7 +45,8 @@ const running = computed(
 );
 const artifactsCount = computed(() =>
   projects.value.reduce(
-    (n, p) => n + p.artifacts.filter((a) => !a.stale).length,
+    (n, p) =>
+      n + p.artifacts.filter((a) => !a.stale && libraryPrimary(a)).length,
     0,
   ),
 );
@@ -543,6 +544,7 @@ onUnmounted(() => {
         @refresh="refresh"
       />
       <ArtifactGallery
+        :projects="projects"
         v-else-if="page === 'assets'"
         :key="libraryProject"
         :initial-project="libraryProject"

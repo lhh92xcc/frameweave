@@ -55,3 +55,19 @@ docker --context orbstack compose up -d --build
 历史素材只作档案浏览。需要继续生产时，先复核规范和分镜，再将选中的文件上传到当前指定素材或分镜，按正常流程审核。导入不会撤销原拒收结论或提升候选图审批。
 
 项目 ZIP 包含迁移清单和制作文档，使用磁盘临时 ZIP 避免大型素材包全部驻留内存。逐文件来源、目标名和 SHA-256 存于 `.local/imports/项目ID/manifest.json`。备份、媒体、清单与制作文档均保持本机私有，不提交公开 Git 仓库。
+
+## 按当前制作线整理
+
+整目录导入用于保存历史，不能把导入数量当成可用素材数量。对照当前剧本、明确选定记录、实际生成输入及 SHA-256 建立私有选择清单，再停止服务执行：
+
+```bash
+.venv/bin/python scripts/curate_media.py .local/imports/curation-manifest.json
+```
+
+清单包含 `project_id`、说明 `note`、分集目录 `episodes` 和显式 `selections`。每个选择条目必须有 `source_path`、`sha256`、`state`、`label`；可记录 `episode`、`shot_id`、`display_title`、`reason`、`static_qc`、`evidence` 和 `order`。`state` 分为 `reference`（当前参考）、`candidate`（待复核）、`repair`（明确返修）、`test`（动作/技术试片）、`history`（历史排除）。未被选择的档案自动归入历史排除；可通过 `exclusions` 按原路径记录具体原因。选择先核验文件哈希，随后备份数据库和完整旧记录，再事务更新用途；重复同一清单保持幂等。
+
+图库默认只展示当前参考，其他用途需主动切换。支持按新版分集筛选，并显示生成缺口。原审核与制作批准不被修改；限范围静帧参考也不等于正式视频批准。人物和场景基准需有当前生成记录的实际引用依据，不能按文件名或修改时间就判断为可用。
+
+如果原工作区引用了不同版本的剧本，可在清单中提供 `current_script`（`content`、`sha256`、`chapters`）。整理会保存旧工作区、换入当前原文，并清空不适用的旧分镜，等待重新规划与批准；不会编造新分镜、自动生成或发起付费调用。
+
+已整理项目的默认 ZIP 只包含当前参考、当前剧本及整理记录，不重新打包返修、旧版试片或废弃文件。只有显式请求 `/api/projects/项目ID/export.zip?include_history=true` 才导出完整历史。源文件与备份保持本机私有。

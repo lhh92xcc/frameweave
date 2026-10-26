@@ -113,6 +113,10 @@ def create_app(data_dir=None, start_worker=True, transport=None):
             "gateway": gateway,
             "engine": engine,
             "worker": bool(workflow.runner and not workflow.runner.done()),
+            "gateway_console_url": "http://127.0.0.1:"
+            + os.environ.get(
+                "FRAMEWEAVE_PUBLIC_GATEWAY_PORT", os.environ.get("FRAMEWEAVE_GATEWAY_PORT", "8766")
+            ),
         }
 
     @app.get("/api/templates")
@@ -337,14 +341,14 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         return FileResponse(path, media_type="image/jpeg")
 
     @app.get("/api/projects/{project_id}/export.zip")
-    async def export(project_id: str):
+    async def export(project_id: str, include_history: bool = False):
         exports = store.root / "exports"
         exports.mkdir(exist_ok=True, mode=0o700)
         fd, filename = tempfile.mkstemp(suffix=".zip", dir=exports)
         os.close(fd)
         path = Path(filename)
         try:
-            await asyncio.to_thread(workflow.export, project_id, path)
+            await asyncio.to_thread(workflow.export, project_id, path, include_history=include_history)
         except BaseException:
             path.unlink(missing_ok=True)
             raise

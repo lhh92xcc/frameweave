@@ -773,7 +773,9 @@ class Workflow:
             },
         )
 
-    def export(self, project_id, target=None):
+    def export(self, project_id, target=None, include_history=False):
+        from studio.archive_curation import library_primary
+
         p = self.store.project(project_id)
         archive = target or io.BytesIO()
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -783,6 +785,8 @@ class Workflow:
             z.writestr("plan.json", json.dumps(p["plan"], ensure_ascii=False, indent=2))
             z.writestr("jobs.json", json.dumps(self.store.jobs(project_id), ensure_ascii=False, indent=2))
             artifacts = self.store.artifacts(project_id)
+            if not include_history:
+                artifacts = [a for a in artifacts if library_primary(a)]
             z.writestr("artifacts.json", json.dumps(artifacts, ensure_ascii=False, indent=2))
             written = set()
             for artifact in artifacts:
@@ -797,6 +801,13 @@ class Workflow:
             import_dir = self.store.root / "imports" / project_id
             if import_dir.is_dir():
                 for file in import_dir.rglob("*"):
+                    if (
+                        p.get("library_curation")
+                        and not include_history
+                        and file.relative_to(import_dir).parts[0]
+                        not in {"library-curation.json", "current-season-script.md", "curation-documents"}
+                    ):
+                        continue
                     if file.is_file() and not file.is_symlink():
                         z.write(file, "import/" + file.relative_to(import_dir).as_posix())
         return None if target else archive.getvalue()

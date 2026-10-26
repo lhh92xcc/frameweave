@@ -246,11 +246,17 @@ const readyForMedia = computed(
     <div v-if="project.import_summary" class="notice archive-notice">
       <Icon name="folder" :size="22" />
       <div>
-        <strong>已导入 {{ project.import_summary.total }} 份历史素材</strong>
-        <p>{{ project.import_summary.note }}</p>
+        <strong>{{
+          project.library_curation
+            ? `当前选定 ${project.library_curation.counts.reference || 0} 份参考`
+            : `已导入 ${project.import_summary.total} 份历史素材`
+        }}</strong>
+        <p>
+          {{ project.library_curation?.note || project.import_summary.note }}
+        </p>
       </div>
       <button class="btn secondary" @click="emit('library', project.id)">
-        浏览导入素材
+        {{ project.library_curation ? "浏览当前参考" : "浏览导入素材" }}
       </button>
     </div>
     <div v-if="project.paused || project.cancelled" class="notice warning">
