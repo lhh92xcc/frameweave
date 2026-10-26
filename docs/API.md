@@ -22,6 +22,7 @@
 | `POST /api/jobs/{id}/cancel`、`retry` | 取消 / 继续查询 / 显式重试 |
 | `GET /api/artifacts` | 所有项目素材及过期状态 |
 | `GET /api/artifacts/{id}/content` | 图片、视频、音频原始文件 |
+| `GET /api/artifacts/{id}/thumbnail` | 历史图片的小尺寸预览 |
 | `POST /api/artifacts/{id}/review` | `{approved, note}`；旧版本不可批准 |
 | `GET/PUT /api/settings` | 模型渠道、付费开关、声音与字幕 |
 | `GET /api/gateway/catalog` | 上游当前连接器目录 |
@@ -33,5 +34,7 @@
 项目创建字段包括 `title`、`mode`、`source`、`brief`、`episodes`（1–50）、`duration`（每集5–600秒）、`aspect_ratio`、`language`、`style`。分镜计划 Schema 见 OpenAPI；所有素材、集与镜头 ID 全局唯一；各集时长精确匹配，来源章节全覆盖。
 
 任务状态：`queued`、`running`、`succeeded`、`blocked`、`failed`、`cancelled`。素材审核：`pending`、`approved`、`rejected`；`stale` 是相对当前规范、分镜和引用版本计算的状态。执行成功不自动批准。
+
+本机历史迁移另有只读任务阶段 `archive`。素材的 `archived`、`title`、`thumbnail_url` 与 `metadata.imported` 用于历史浏览，原始审核结论单独保存，不允许通过审核接口将档案直接批准为生产素材。项目 `import_summary` 记录数量、来源分组和文件校验异常；迁移步骤见 [IMPORT.md](IMPORT.md)。项目 ZIP 包含迁移清单和制作文档，使用磁盘临时文件响应。
 
 通用应用错误：`{error:{code,message}}`；404 为缺失，409 为版本冲突，422 为输入或前置条件问题，503 为供应商/服务不可用。HTTP Schema 校验错误由 FastAPI 的 `detail` 返回。供应商原始鉴权响应不会写入工作台错误正文。所有运行数据与凭据禁止提交 Git。

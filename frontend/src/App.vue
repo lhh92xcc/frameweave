@@ -25,6 +25,7 @@ const page = ref("home"),
   error = ref(""),
   toast = ref(""),
   mobileNav = ref(false);
+const libraryProject = ref("");
 let timer: ReturnType<typeof setInterval>,
   toastTimer: ReturnType<typeof setTimeout>;
 let pendingRefresh: Promise<void> | null = null;
@@ -69,7 +70,14 @@ function navigate(id: string) {
   page.value = id;
   mobileNav.value = false;
   location.hash = id;
+  if (id === "assets") libraryProject.value = "";
   if (id !== "project") selected.value = null;
+}
+function openLibrary(projectId: string) {
+  libraryProject.value = projectId;
+  page.value = "assets";
+  selected.value = null;
+  location.hash = "assets/" + projectId;
 }
 async function refresh() {
   // A mutation's refresh runs after any earlier poll, and callers can await it.
@@ -88,7 +96,9 @@ async function refreshNow() {
     const [ps, h, detail] = await Promise.all([
       api<Project[]>("/projects"),
       api("/health"),
-      selectedId ? api<Project>("/projects/" + selectedId) : Promise.resolve(null),
+      selectedId
+        ? api<Project>("/projects/" + selectedId)
+        : Promise.resolve(null),
     ]);
     projects.value = ps;
     health.value = h;
@@ -123,7 +133,11 @@ async function parseHash() {
   if (id === "project" && pid) {
     const p = projects.value.find((p) => p.id === pid);
     if (p) await openProject(p);
-  } else if (["home", "projects", "assets", "jobs", "settings"].includes(id)) {
+  } else if (id === "assets") {
+    libraryProject.value = pid || "";
+    page.value = "assets";
+    selected.value = null;
+  } else if (["home", "projects", "jobs", "settings"].includes(id)) {
     page.value = id;
   }
 }
@@ -520,6 +534,7 @@ onUnmounted(() => {
         @notify="notify"
         @settings="navigate('settings')"
         @back="navigate('projects')"
+        @library="openLibrary"
       />
       <SettingsPanel v-else-if="page === 'settings'" @notify="notify" />
       <JobQueue
@@ -527,7 +542,12 @@ onUnmounted(() => {
         @notify="notify"
         @refresh="refresh"
       />
-      <ArtifactGallery v-else-if="page === 'assets'" @notify="notify" />
+      <ArtifactGallery
+        v-else-if="page === 'assets'"
+        :key="libraryProject"
+        :initial-project="libraryProject"
+        @notify="notify"
+      />
     </div>
     <CreateProject
       v-if="creating"

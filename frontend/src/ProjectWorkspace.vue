@@ -10,6 +10,7 @@ const props = defineProps<{ project: Project; reload: () => Promise<void> }>(),
     notify: [message: string];
     settings: [];
     back: [];
+    library: [projectId: string];
   }>();
 const fileInput = ref<HTMLInputElement>(),
   uploadTarget = ref("");
@@ -241,6 +242,16 @@ const readyForMedia = computed(
           }}
         </button>
       </div>
+    </div>
+    <div v-if="project.import_summary" class="notice archive-notice">
+      <Icon name="folder" :size="22" />
+      <div>
+        <strong>已导入 {{ project.import_summary.total }} 份历史素材</strong>
+        <p>{{ project.import_summary.note }}</p>
+      </div>
+      <button class="btn secondary" @click="emit('library', project.id)">
+        浏览导入素材
+      </button>
     </div>
     <div v-if="project.paused || project.cancelled" class="notice warning">
       <Icon name="pause" />{{

@@ -5,6 +5,7 @@ import io
 import json
 import mimetypes
 import os
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,6 +14,7 @@ import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from studio.catalog import TEMPLATES
@@ -321,12 +323,31 @@ def create_app(data_dir=None, start_worker=True, transport=None):
             raise HTTPException(404)
         return FileResponse(path, media_type=a["mime"])
 
+    @app.get("/api/artifacts/{artifact_id}/thumbnail")
+    async def thumbnail(artifact_id: str):
+        a = store.artifact(artifact_id)
+        path = (store.root / a.get("thumbnail", "missing")).resolve()
+        if not path.is_relative_to(store.root / "thumbnails") or not path.is_file():
+            raise HTTPException(404)
+        return FileResponse(path, media_type="image/jpeg")
+
     @app.get("/api/projects/{project_id}/export.zip")
     async def export(project_id: str):
-        return Response(
-            workflow.export(project_id),
+        exports = store.root / "exports"
+        exports.mkdir(exist_ok=True, mode=0o700)
+        fd, filename = tempfile.mkstemp(suffix=".zip", dir=exports)
+        os.close(fd)
+        path = Path(filename)
+        try:
+            await asyncio.to_thread(workflow.export, project_id, path)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return FileResponse(
+            path,
             media_type="application/zip",
-            headers={"Content-Disposition": 'attachment; filename="frameweave-project.zip"'},
+            filename="frameweave-project.zip",
+            background=BackgroundTask(path.unlink, missing_ok=True),
         )
 
     @app.get("/api/settings")

@@ -71,6 +71,10 @@ docker --context orbstack compose up -d --build
 
 详细部署、数据备份、端口和字幕依赖见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。容器与原生运行二选一，先停止正在运行的版本。不要让两套服务同时写同一数据库。
 
+## 历史素材导入
+
+旧项目的参考图、视频、音频和制作记录可整体迁入，图库支持项目/来源筛选、搜索与分页；导入保留原审核状态。操作见 [历史素材导入](docs/IMPORT.md)。
+
 ## 合并上游更新
 
 ```bash

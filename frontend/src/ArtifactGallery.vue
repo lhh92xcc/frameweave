@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { api, statusText, stageText, type Artifact } from "./api";
 import Icon from "./Icon.vue";
 import MediaDetail from "./MediaDetail.vue";
@@ -9,16 +9,74 @@ const emit = defineEmits<{ notify: [message: string] }>(),
   includeOld = ref(false),
   detail = ref<Artifact | null>(null),
   error = ref("");
+const props = defineProps<{ initialProject?: string }>();
+const projectFilter = ref(props.initialProject || ""),
+  groupFilter = ref(""),
+  query = ref(""),
+  currentPage = ref(1);
+const pageSize = 32;
+const projects = computed(() => [
+  ...new Map(
+    artifacts.value.map((a) => [a.project_id, a.project_title]),
+  ).entries(),
+]);
+const groups = computed(
+  () =>
+    [
+      ...new Set(
+        artifacts.value
+          .filter(
+            (a) => !projectFilter.value || a.project_id === projectFilter.value,
+          )
+          .map((a) => a.metadata?.imported?.group)
+          .filter(Boolean),
+      ),
+    ] as string[],
+);
 const filtered = computed(() =>
   artifacts.value.filter(
     (a) =>
       (includeOld.value || !a.stale) &&
-      (filter.value === "all" || a.kind === filter.value),
+      (filter.value === "all" || a.kind === filter.value) &&
+      (!projectFilter.value || a.project_id === projectFilter.value) &&
+      (!groupFilter.value ||
+        a.metadata?.imported?.group === groupFilter.value) &&
+      (!query.value ||
+        [
+          a.title,
+          a.entity_id,
+          a.project_title,
+          a.metadata?.imported?.source_path,
+          a.metadata?.imported?.shot_id,
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(query.value.toLowerCase())),
   ),
 );
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(filtered.value.length / pageSize)),
+);
+const visible = computed(() =>
+  filtered.value.slice(
+    (currentPage.value - 1) * pageSize,
+    currentPage.value * pageSize,
+  ),
+);
+watch(
+  () => props.initialProject,
+  (value) => (projectFilter.value = value || ""),
+);
+watch(
+  [filter, includeOld, projectFilter, groupFilter, query],
+  () => (currentPage.value = 1),
+);
+watch(projectFilter, () => (groupFilter.value = ""));
 async function load() {
   try {
     artifacts.value = await api("/artifacts");
+    currentPage.value = Math.min(currentPage.value, pageCount.value);
+    error.value = "";
   } catch (e: any) {
     error.value = e.message;
   }
@@ -36,6 +94,29 @@ onMounted(load);
       <button class="btn secondary" @click="load">
         <Icon name="refresh" :size="16" />刷新素材
       </button>
+    </div>
+    <div class="archive-filters">
+      <label
+        >项目<select v-model="projectFilter" aria-label="按项目筛选素材">
+          <option value="">全部项目</option>
+          <option v-for="[id, title] in projects" :key="id" :value="id">
+            {{ title }}
+          </option>
+        </select></label
+      >
+      <label v-if="groups.length"
+        >来源分组<select v-model="groupFilter" aria-label="按来源分组筛选">
+          <option value="">全部来源</option>
+          <option v-for="group in groups" :key="group">{{ group }}</option>
+        </select></label
+      >
+      <label
+        >搜索<input
+          v-model="query"
+          aria-label="搜索历史素材"
+          placeholder="文件名、镜头编号、原始路径…"
+      /></label>
+      <span class="muted">{{ filtered.length }} 份素材</span>
     </div>
     <div class="media-filters">
       <div class="segmented">
@@ -66,12 +147,16 @@ onMounted(load);
       <p>在项目中生成参考图或视频后，它们会自动收进这里。</p>
     </div>
     <div v-else class="media-grid">
-      <article v-for="a in filtered" :key="a.id" class="media-card">
-        <button class="media-card-preview" @click="detail = a">
+      <article v-for="a in visible" :key="a.id" class="media-card">
+        <button
+          class="media-card-preview"
+          :aria-label="'预览 ' + (a.title || a.entity_id)"
+          @click="detail = a"
+        >
           <img
             v-if="a.mime.startsWith('image/')"
-            :src="a.url"
-            :alt="a.entity_id"
+            :src="a.thumbnail_url || a.url"
+            :alt="a.title || a.entity_id"
             loading="lazy"
           /><video
             v-else-if="a.mime.startsWith('video/')"
@@ -80,19 +165,51 @@ onMounted(load);
             muted
           /><Icon v-else name="audio" :size="32" /><span
             :class="['media-review badge', a.stale ? 'stale' : a.review]"
-            >{{ a.stale ? "已过期" : statusText[a.review] }}</span
+            >{{
+              a.archived
+                ? "历史导入"
+                : a.stale
+                  ? "已过期"
+                  : statusText[a.review]
+            }}</span
           ><span class="media-preview-overlay"
             ><Icon name="eye" :size="26"
           /></span>
         </button>
         <div class="media-card-info">
-          <h3>{{ a.entity_id }}</h3>
+          <h3 :title="a.title || a.entity_id">{{ a.title || a.entity_id }}</h3>
           <p>{{ a.project_title }} · {{ stageText[a.kind] }}</p>
-          <span class="muted small"
+          <span class="muted small" v-if="a.archived"
+            >{{ a.metadata?.imported?.group }} ·
+            {{
+              a.metadata?.imported?.shot_id || a.metadata?.imported?.role
+            }}</span
+          >
+          <span class="muted small" v-else
             >规范 v{{ a.contract_revision }} · {{ a.route?.provider }}</span
           >
         </div>
       </article>
+    </div>
+    <div v-if="filtered.length" class="archive-pagination">
+      <button
+        class="btn secondary"
+        :disabled="currentPage === 1"
+        @click="currentPage--"
+      >
+        上一页
+      </button>
+      <span
+        >第 {{ currentPage }} / {{ pageCount }} 页 · 每页
+        {{ pageSize }} 份</span
+      >
+      <button
+        class="btn secondary"
+        :disabled="currentPage >= pageCount"
+        @click="currentPage++"
+      >
+        下一页
+      </button>
     </div>
     <MediaDetail
       v-if="detail"

@@ -115,6 +115,7 @@ class Workflow:
         candidate = self.store.latest_artifact(p["id"], kind, entity_id)
         if (
             not candidate
+            or candidate.get("archived")
             or candidate["contract_hash"] != p["contract"]["hash"]
             or candidate["plan_revision"] != p["plan_revision"]
         ):
@@ -239,6 +240,8 @@ class Workflow:
 
     def review(self, artifact_id, approved, note=""):
         a = self.store.artifact(artifact_id)
+        if a.get("archived"):
+            raise ValueError("历史素材保留原审核记录；请先导入到当前分镜，再审核其制作用途")
         p = self.store.project(a["project_id"])
         current = self.latest(p, a["kind"], a["entity_id"])
         if not current or current["id"] != artifact_id:
@@ -258,9 +261,11 @@ class Workflow:
             result.pop("contract_history", None)
         artifacts = self.store.artifacts(p["id"])
         for a in artifacts:
-            current = self.latest(p, a["kind"], a["entity_id"])
-            a["stale"] = not current or current["id"] != a["id"]
+            current = None if a.get("archived") else self.latest(p, a["kind"], a["entity_id"])
+            a["stale"] = False if a.get("archived") else not current or current["id"] != a["id"]
             a["url"] = "/api/artifacts/" + a["id"] + "/content"
+            if a.get("thumbnail"):
+                a["thumbnail_url"] = "/api/artifacts/" + a["id"] + "/thumbnail"
         result["artifacts"] = artifacts
         result["jobs"] = [{k: v for k, v in j.items() if k != "snapshot"} for j in self.store.jobs(p["id"])]
         result["progress"] = self.progress(p)
@@ -768,9 +773,9 @@ class Workflow:
             },
         )
 
-    def export(self, project_id):
+    def export(self, project_id, target=None):
         p = self.store.project(project_id)
-        archive = io.BytesIO()
+        archive = target or io.BytesIO()
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as z:
             z.writestr("production-requirements.md", p["contract"]["markdown"])
             z.writestr("source.txt", p["source"])
@@ -779,12 +784,19 @@ class Workflow:
             z.writestr("jobs.json", json.dumps(self.store.jobs(project_id), ensure_ascii=False, indent=2))
             artifacts = self.store.artifacts(project_id)
             z.writestr("artifacts.json", json.dumps(artifacts, ensure_ascii=False, indent=2))
+            written = set()
             for artifact in artifacts:
                 file = self.store.media / artifact["file"]
-                if file.is_file():
+                if file.is_file() and file.name not in written:
                     z.write(file, "media/" + file.name)
+                    written.add(file.name)
                 if artifact.get("subtitle_file") and (self.store.media / artifact["subtitle_file"]).is_file():
                     z.write(
                         self.store.media / artifact["subtitle_file"], "subtitles/" + artifact["subtitle_file"]
                     )
-        return archive.getvalue()
+            import_dir = self.store.root / "imports" / project_id
+            if import_dir.is_dir():
+                for file in import_dir.rglob("*"):
+                    if file.is_file() and not file.is_symlink():
+                        z.write(file, "import/" + file.relative_to(import_dir).as_posix())
+        return None if target else archive.getvalue()

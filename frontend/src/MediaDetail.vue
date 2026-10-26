@@ -27,7 +27,7 @@ async function review(approved: boolean) {
 }
 async function prompt() {
   showPrompt.value = !showPrompt.value;
-  if (showPrompt.value && !job.value)
+  if (showPrompt.value && !props.artifact.archived && !job.value)
     try {
       job.value = await api("/jobs/" + props.artifact.job_id);
     } catch (e: any) {
@@ -64,11 +64,37 @@ async function prompt() {
       </div>
       <div class="media-detail-info">
         <div class="eyebrow">REVIEW & REFINE</div>
-        <h2>{{ artifact.entity_id }}</h2>
+        <h2>{{ artifact.title || artifact.entity_id }}</h2>
         <span :class="['badge', artifact.stale ? 'stale' : artifact.review]">{{
-          artifact.stale ? "已过期" : statusText[artifact.review]
+          artifact.archived
+            ? "历史导入 · 用途待复核"
+            : artifact.stale
+              ? "已过期"
+              : statusText[artifact.review]
         }}</span>
         <dl class="metadata-list">
+          <template v-if="artifact.archived">
+            <dt>原始路径</dt>
+            <dd class="archive-path">
+              {{ artifact.metadata?.imported?.source_path }}
+            </dd>
+            <dt>来源分组</dt>
+            <dd>{{ artifact.metadata?.imported?.group }}</dd>
+            <dt>原审核状态</dt>
+            <dd>
+              {{
+                artifact.metadata?.imported?.quality_status || "未记录，待复核"
+              }}
+            </dd>
+            <dt>原制作审批</dt>
+            <dd>
+              {{ artifact.metadata?.imported?.production_approval || "未记录" }}
+            </dd>
+            <dt>SHA-256</dt>
+            <dd class="archive-path">
+              {{ artifact.metadata?.imported?.sha256 }}
+            </dd>
+          </template>
           <dt>实际模型</dt>
           <dd>{{ artifact.route?.provider }} / {{ artifact.route?.model }}</dd>
           <dt>渠道</dt>
@@ -99,6 +125,20 @@ async function prompt() {
             </dd></template
           >
         </dl>
+        <div v-if="artifact.archived" class="notice">
+          历史文件保留原版本及审核记录。下载后可在当前项目的指定分镜中上传并审核，再用于生产。
+        </div>
+        <div
+          v-if="artifact.metadata?.imported?.record_warning"
+          class="notice warning"
+        >
+          {{ artifact.metadata.imported.record_warning }}
+        </div>
+        <div v-if="artifact.metadata?.validation_error" class="notice warning">
+          原文件读取检查未通过（{{
+            artifact.metadata.validation_error
+          }}），已保留文件供下载核对。
+        </div>
         <div
           v-if="artifact.metadata?.aspect_matches === false"
           class="notice warning"
@@ -113,7 +153,7 @@ async function prompt() {
         <p class="muted small">
           请检查人物身份、风格、手部与道具、动作及剧情信息。模型执行成功不代表画面合格。
         </p>
-        <label class="field"
+        <label v-if="!artifact.archived" class="field"
           >审核备注<textarea
             v-model="note"
             rows="3"
@@ -122,12 +162,14 @@ async function prompt() {
         </label>
         <div class="button-row">
           <button
+            v-if="!artifact.archived"
             class="btn primary"
             :disabled="busy || artifact.stale"
             @click="review(true)"
           >
             <Icon name="check" :size="16" />批准素材</button
           ><button
+            v-if="!artifact.archived"
             class="btn secondary"
             :disabled="busy || artifact.stale"
             @click="review(false)"
@@ -135,18 +177,21 @@ async function prompt() {
             需要返工</button
           ><a
             :href="artifact.url"
-            :download="artifact.entity_id"
+            :download="artifact.title || artifact.entity_id"
             class="icon-btn"
             title="下载原始素材"
             ><Icon name="download"
           /></a>
         </div>
         <button class="text-button prompt-toggle" @click="prompt">
-          {{ showPrompt ? "收起" : "查看" }}完整请求与规范
+          {{ showPrompt ? "收起" : "查看"
+          }}{{ artifact.archived ? "导入记录" : "完整请求与规范" }}
           <Icon name="down" :size="14" />
         </button>
         <pre v-if="showPrompt" class="prompt-code">{{
-          job?.effective_prompt ||
+          (artifact.archived
+            ? JSON.stringify(artifact.metadata?.imported, null, 2)
+            : job?.effective_prompt) ||
           JSON.stringify(job?.snapshot, null, 2) ||
           "读取中…"
         }}</pre>

@@ -38,6 +38,7 @@ export const stageText: Record<string, string> = {
   video: "动态视频",
   audio: "独立配音",
   render: "成片合成",
+  archive: "历史素材导入",
 };
 export function stamp(value: number) {
   return new Date(value * 1000).toLocaleString("zh-CN", {
@@ -60,6 +61,7 @@ export interface Template {
 }
 export interface Artifact {
   id: string;
+  project_id: string;
   entity_id: string;
   kind: string;
   url: string;
@@ -74,6 +76,9 @@ export interface Artifact {
   job_id: string;
   project_title?: string;
   review_note?: string;
+  archived?: boolean;
+  title?: string;
+  thumbnail_url?: string;
 }
 export interface Job {
   id: string;
@@ -119,4 +124,10 @@ export interface Project {
   progress: { id: string; name: string; done: number; total: number }[];
   created_at: number;
   updated_at: number;
+  import_summary?: {
+    total: number;
+    counts: Record<string, number>;
+    note: string;
+    groups: Record<string, number>;
+  };
 }
