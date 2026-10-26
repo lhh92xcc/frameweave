@@ -11,7 +11,7 @@ Unified local image/video production studio, Chinese UI, six workflow templates,
 - `scripts/`: bootstrap, process lifecycle, upstream checks/updates and compatibility verification.
 
 ## Acceptance evidence to gather
-- [ ] Clean recursive clone, pinned upstream revisions, reproducible install.
+- [x] Public remote recursively cloned into a clean directory; pinned revisions, bootstrap, production build, 27 backend tests and Ruff passed without local source/runtime files.
 - [x] Contract editing/approval/version invalidation and exact prompt snapshot tests.
 - [x] Actual upstream chapter parsing and actual FFmpeg render of local test media, CJK subtitles, three canvases and audio.
 - [x] Durable task idempotency, restart recovery, pause/resume/cancel/retry, receipt recovery.
@@ -21,6 +21,6 @@ Unified local image/video production studio, Chinese UI, six workflow templates,
 - [x] Responsive UI browser verification; source import, contract, storyboard, settings and final render/export. Failure/recovery covered at API/provider level.
 - [x] Native startup verified. OrbStack image build and healthy service startup verified.
 - [x] Upstream sync script, actual new-commit/rollback tests, CI configuration and documentation.
-- [ ] Public GitHub repo synchronized with no credentials/runtime data.
+- [x] Public GitHub repo synchronized under `lhh92xcc/frameweave`; tracked-file review excludes private credentials, runtime databases, user media and dependency environments.
 
 No real external model output or quality claim will be inferred from mocked tests. User supplies model credentials in Settings.
