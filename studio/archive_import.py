@@ -11,13 +11,14 @@ import sqlite3
 import subprocess
 from collections import Counter
 from pathlib import Path
+from xml.etree import ElementTree
 
 from PIL import Image, ImageOps
 
 from studio.models import ProductionPlan, ProjectCreate
 from studio.store import Store, digest, now, uid
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac"}
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
@@ -58,6 +59,8 @@ def classify(path):
         return "audio", "配音 / 音频"
     if suffix in VIDEO_EXTENSIONS:
         return ("render", "历史试片") if "preview" in path.stem.lower() else ("video", "镜头视频 / 测试片")
+    if "post" in path.parts:
+        return "reference", "后期道具 / 字幕图层"
     if any(part in path.parts for part in ("qc", "chatgpt", "review-frames", "review-crops", "smoke-review")):
         return "reference", "审核证据 / 抽帧"
     if "keyframe" in text or "/frames/" in text:
@@ -66,6 +69,19 @@ def classify(path):
 
 
 def metadata(path, suffix, thumbnail):
+    if suffix == ".svg":
+        try:
+            root = ElementTree.parse(path).getroot()
+        except ElementTree.ParseError as exc:
+            raise ValueError("无效 SVG") from exc
+        if root.tag != "{http://www.w3.org/2000/svg}svg":
+            raise ValueError("无效 SVG 根元素")
+        dimensions = {}
+        for name in ("width", "height"):
+            value = re.fullmatch(r"(\d+(?:\.\d+)?)(?:px)?", root.get(name, ""))
+            if value:
+                dimensions[name] = float(value[1])
+        return {"format": "SVG", **dimensions}
     if suffix in IMAGE_EXTENSIONS:
         with Image.open(path) as source:
             source.verify()

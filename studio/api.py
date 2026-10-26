@@ -321,7 +321,12 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         path = (store.media / a["file"]).resolve()
         if not path.is_relative_to(store.media) or not path.is_file():
             raise HTTPException(404)
-        return FileResponse(path, media_type=a["mime"])
+        headers = (
+            {"Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'"}
+            if a["mime"] == "image/svg+xml"
+            else None
+        )
+        return FileResponse(path, media_type=a["mime"], headers=headers)
 
     @app.get("/api/artifacts/{artifact_id}/thumbnail")
     async def thumbnail(artifact_id: str):

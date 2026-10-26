@@ -30,7 +30,7 @@
 }
 ```
 
-支持图片 PNG/JPG/JPEG/WebP/GIF、视频 MP4/MOV/WebM/M4V、音频 MP3/WAV/M4A/AAC/FLAC。制作文档需显式指定，支持 MD/TXT/JSON/SRT。不要选择包含凭据的文档。可附 `chapters` 和符合工作台 `ProductionPlan` Schema 的 `plan`；分镜需满足集数、每集总时长和章节覆盖要求。
+支持图片 PNG/JPG/JPEG/WebP/GIF/SVG、视频 MP4/MOV/WebM/M4V、音频 MP3/WAV/M4A/AAC/FLAC。制作文档需显式指定，支持 MD/TXT/JSON/SRT。不要选择包含凭据的文档。可附 `chapters` 和符合工作台 `ProductionPlan` Schema 的 `plan`；分镜需满足集数、每集总时长和章节覆盖要求。
 
 ## 执行
 
