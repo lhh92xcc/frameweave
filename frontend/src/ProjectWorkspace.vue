@@ -248,7 +248,7 @@ const readyForMedia = computed(
       <div>
         <strong>{{
           project.library_curation
-            ? `当前选定 ${project.library_curation.counts.reference || 0} 份参考`
+            ? `当前素材 ${(project.library_curation.counts.reference || 0) + (project.library_curation.counts.candidate || 0)} 份（选定参考 ${project.library_curation.counts.reference || 0}、待复核 ${project.library_curation.counts.candidate || 0}）`
             : `已导入 ${project.import_summary.total} 份历史素材`
         }}</strong>
         <p>
@@ -256,7 +256,7 @@ const readyForMedia = computed(
         </p>
       </div>
       <button class="btn secondary" @click="emit('library', project.id)">
-        {{ project.library_curation ? "浏览当前参考" : "浏览导入素材" }}
+        {{ project.library_curation ? "浏览当前素材" : "浏览导入素材" }}
       </button>
     </div>
     <div v-if="project.paused || project.cancelled" class="notice warning">

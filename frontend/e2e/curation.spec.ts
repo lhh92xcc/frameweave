@@ -74,8 +74,16 @@ test("curated library separates references, pending candidates, repairs and old 
     route.fulfill({ contentType: "image/png", body: png }),
   );
   await page.goto("/#assets/curated-demo");
-  await expect(page.locator(".media-card")).toHaveCount(2);
+  await expect(page.locator(".media-card")).toHaveCount(3);
   await expect(page.locator(".media-card").first()).toContainText("selected-0");
+  await page.getByLabel("按集数筛选素材").selectOption("EP06");
+  await expect(page.locator(".media-card")).toHaveCount(1);
+  await expect(page.locator(".media-card")).toContainText("selected-2");
+  await expect(page.locator(".media-card")).toContainText("candidate");
+  await expect(page.locator(".gallery-content")).toContainText("待复核 1 张");
+  await page.getByLabel("按集数筛选素材").selectOption("");
+  await page.getByRole("button", { name: /^选定参考/ }).click();
+  await expect(page.locator(".media-card")).toHaveCount(2);
   await page.getByRole("button", { name: /^待复核候选/ }).click();
   await expect(page.locator(".media-card")).toHaveCount(1);
   await expect(page.locator(".media-card")).toContainText("selected-2");

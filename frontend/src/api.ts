@@ -144,5 +144,8 @@ export interface Project {
 }
 
 export function libraryPrimary(a: Artifact) {
-  return !a.metadata?.curation || a.metadata.curation.state === "reference";
+  return (
+    !a.metadata?.curation ||
+    ["reference", "candidate"].includes(a.metadata.curation.state)
+  );
 }

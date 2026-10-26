@@ -24,3 +24,5 @@ Unified local image/video production studio, Chinese UI, six workflow templates,
 - [x] Public GitHub repo synchronized under `lhh92xcc/frameweave`; tracked-file review excludes private credentials, runtime databases, user media and dependency environments.
 
 No real external model output or quality claim will be inferred from mocked tests. User supplies model credentials in Settings.
+
+Curated archives keep current candidates visible alongside selected references. Pending QC is separate from exclusion: default gallery, project counters and exports include both states without changing approvals. Repairs, old tests and historical files remain separate; episode filters show generated, pending, repair and missing counts.

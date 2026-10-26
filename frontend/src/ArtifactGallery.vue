@@ -21,7 +21,7 @@ const projectFilter = ref(props.initialProject || ""),
   groupFilter = ref(""),
   query = ref(""),
   currentPage = ref(1);
-const scope = ref("reference"),
+const scope = ref("current"),
   episodeFilter = ref("");
 const selectedProject = computed(() =>
   props.projects?.find((p) => p.id === projectFilter.value),
@@ -35,7 +35,8 @@ const hasCuration = computed(() =>
   projectArtifacts.value.some((a) => a.metadata?.curation),
 );
 const scopes = [
-  ["reference", "当前参考"],
+  ["current", "当前素材"],
+  ["reference", "选定参考"],
   ["candidate", "待复核候选"],
   ["repair", "明确返修"],
   ["test", "动作试片"],
@@ -49,7 +50,7 @@ const scopeCounts = computed(() =>
       projectArtifacts.value.filter(
         (a) =>
           key === "all" ||
-          (key === "reference"
+          (key === "current"
             ? libraryPrimary(a)
             : a.metadata?.curation?.state === key),
       ).length,
@@ -72,6 +73,15 @@ const episodes = computed(
 const episodeInfo = computed(() =>
   episodes.value.find((e) => e.id === episodeFilter.value),
 );
+const episodeCounts = computed(() => {
+  const counts: Record<string, number> = {};
+  for (const a of projectArtifacts.value) {
+    if (a.metadata?.curation?.episode !== episodeFilter.value) continue;
+    const state = a.metadata.curation.state;
+    counts[state] = (counts[state] || 0) + 1;
+  }
+  return counts;
+});
 const pageSize = 32;
 const projects = computed(() => [
   ...new Map(
@@ -98,7 +108,7 @@ const filtered = computed(() =>
         (includeOld.value || !a.stale) &&
         (!hasCuration.value ||
           scope.value === "all" ||
-          (scope.value === "reference"
+          (scope.value === "current"
             ? libraryPrimary(a)
             : a.metadata?.curation?.state === scope.value)) &&
         (!episodeFilter.value ||
@@ -172,7 +182,7 @@ onMounted(load);
           v-if="selectedProject?.library_curation"
           class="btn secondary"
           :href="'/api/projects/' + projectFilter + '/export.zip'"
-          >下载当前参考</a
+          >下载当前素材（含待复核）</a
         >
         <button class="btn secondary" @click="load">
           <Icon name="refresh" :size="16" />刷新素材
@@ -181,12 +191,17 @@ onMounted(load);
     </div>
     <div v-if="hasCuration" class="curation-summary notice">
       <div>
-        <strong>按当前制作线整理，只展示选定参考</strong>
+        <strong>当前制作素材：选定参考与待复核候选</strong>
         <p>
-          {{
-            selectedProject?.library_curation?.note ||
-            "待复核、明确返修和历史版本分开保存；当前参考不等于成片制作批准。"
+          当前 {{ scopeCounts.current }} 份：{{
+            scopeCounts.reference
           }}
+          份选定参考、
+          {{
+            scopeCounts.candidate
+          }}
+          份待复核候选。待复核不等于废弃，也不等于制作批准；
+          {{ scopeCounts.repair }} 份明确返修另列，旧试片与历史文件分开保存。
         </p>
       </div>
     </div>
@@ -217,7 +232,8 @@ onMounted(load);
             :key="episode.id"
             :value="episode.id"
           >
-            {{ episode.id }} · {{ episode.title }}
+            {{ episode.id }} · {{ episode.title }}（已生成
+            {{ episode.generated }} / 10）
           </option>
         </select></label
       >
@@ -240,7 +256,16 @@ onMounted(load);
       <span v-if="episodeInfo.missing_slots.length"
         >未生成：{{ episodeInfo.missing_slots.join("、") }}。</span
       >
-      当前列表只显示所选用途，返修和待复核不会计入当前参考。
+      选定参考 {{ episodeCounts.reference || 0 }} 张，待复核
+      {{ episodeCounts.candidate || 0 }} 张，明确返修
+      {{ episodeCounts.repair || 0 }} 张。当前列表按所选用途筛选。
+      <button
+        v-if="episodeCounts.repair && scope !== 'repair'"
+        class="btn secondary"
+        @click="scope = 'repair'"
+      >
+        查看本集返修
+      </button>
     </p>
     <div class="media-filters">
       <div class="segmented">
@@ -273,7 +298,7 @@ onMounted(load);
       <p>
         {{
           hasCuration
-            ? "可切换集数或用途查看；尚未生成和未完成审核的镜头不会冒充可用素材。"
+            ? "可切换集数或用途查看。当前素材包含待复核候选；明确返修单列，历史版本默认排除。"
             : "在项目中生成参考图或视频后，它们会自动收进这里。"
         }}
       </p>

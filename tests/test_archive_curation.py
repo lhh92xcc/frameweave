@@ -11,11 +11,11 @@ from studio.archive_import import import_archive, sha256
 from studio.store import digest
 
 
-def test_curation_checks_hashes_preserves_history_and_exports_only_selected(app, client, tmp_path):
+def test_curation_exports_current_candidates_without_promoting_approval(app, client, tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     png = Path(__file__).parent / "fixtures/reference.png"
-    for name in ["selected.png", "pending.png", "withdrawn.png"]:
+    for name in ["selected.png", "pending.png", "repair.png", "test.png", "withdrawn.png"]:
         shutil.copy2(png, source / name)
     result = import_archive(
         {
@@ -41,6 +41,8 @@ def test_curation_checks_hashes_preserves_history_and_exports_only_selected(app,
         "selections": [
             {"source_path": "selected.png", "sha256": "0" * 64, "state": "reference", "label": "限范围参考"},
             {"source_path": "pending.png", "sha256": sha256(png), "state": "candidate", "label": "待复核"},
+            {"source_path": "repair.png", "sha256": sha256(png), "state": "repair", "label": "明确返修"},
+            {"source_path": "test.png", "sha256": sha256(png), "state": "test", "label": "旧版试片"},
         ],
     }
     with pytest.raises(ValueError, match="哈希不匹配"):
@@ -48,13 +50,13 @@ def test_curation_checks_hashes_preserves_history_and_exports_only_selected(app,
     assert "library_curation" not in store.project(project_id)
     manifest["selections"][0]["sha256"] = sha256(png)
     summary = curate_archive(store, manifest)
-    assert summary["counts"] == {"history": 1, "candidate": 1, "reference": 1}
+    assert summary["counts"] == {"history": 1, "candidate": 1, "reference": 1, "repair": 1, "test": 1}
     assert curate_archive(store, manifest) == summary
     p = store.project(project_id)
     assert p["source"] == "新的两集工作剧本。" and p["plan"] is None
     assert not p["automation"] and not p["contract"]["approved"] and not p["plan_approved"]
     artifacts = store.artifacts(project_id)
-    assert sum(library_primary(a) for a in artifacts) == 1
+    assert sum(library_primary(a) for a in artifacts) == 2
     assert all(a["review"] == "pending" and a["archived"] for a in artifacts)
     withdrawn = next(a for a in artifacts if a["title"] == "withdrawn.png")
     assert withdrawn["metadata"]["imported"]["production_approval"] == "WITHDRAWN"
@@ -66,7 +68,11 @@ def test_curation_checks_hashes_preserves_history_and_exports_only_selected(app,
         response = client.get(f"/api/projects/{project_id}/export.zip?include_history={str(full).lower()}")
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
             selected = json.loads(archive.read("artifacts.json"))
-            assert len(selected) == (3 if full else 1)
+            assert len(selected) == (5 if full else 2)
+            if not full:
+                assert {a["title"] for a in selected} == {"selected.png", "pending.png"}
+                assert all(a["review"] == "pending" for a in selected)
+            assert archive.testzip() is None
             assert ("import/before-curation-r1.json" in archive.namelist()) == full
             assert "import/library-curation.json" in archive.namelist()
     assert all(sha256(p) == sha256(png) for p in source.iterdir())

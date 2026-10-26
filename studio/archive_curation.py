@@ -14,7 +14,9 @@ STATES = {"reference", "candidate", "repair", "test", "history"}
 
 def library_primary(artifact):
     selection = artifact.get("metadata", {}).get("curation")
-    return not selection or selection["state"] == "reference"
+    # Pending current candidates are useful work in progress, not discarded history.
+    # Visibility/export never changes their QC or production approval.
+    return not selection or selection["state"] in {"reference", "candidate"}
 
 
 def curate_archive(store, manifest):
