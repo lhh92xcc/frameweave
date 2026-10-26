@@ -1,0 +1,11 @@
+FrameWeave · 镜织工坊
+Copyright (c) 2026 FrameWeave contributors.
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+Integrated upstreams (retained as unmodified Git submodules):
+- https://github.com/lhh92xcc/ai-video-generation
+- https://github.com/lhh92xcc/web2api-web (AGPL-3.0-or-later)
+
+Each upstream and dependency retains its copyright and applicable license.
+Vue, Lucide, marked, DOMPurify, FastAPI, uvicorn, httpx, Pillow and other
+third-party dependencies are distributed under their respective licenses.

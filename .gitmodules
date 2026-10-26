@@ -1,0 +1,6 @@
+[submodule "upstream/ai-video-generation"]
+	path = upstream/ai-video-generation
+	url = https://github.com/lhh92xcc/ai-video-generation.git
+[submodule "upstream/web2api-web"]
+	path = upstream/web2api-web
+	url = https://github.com/lhh92xcc/web2api-web.git

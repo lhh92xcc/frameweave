@@ -1,0 +1,15 @@
+name: frameweave
+services:
+  studio:
+    build: .
+    init: true
+    ports:
+      - "127.0.0.1:8787:8787"
+      - "127.0.0.1:8766:8766"
+    volumes:
+      - ./.local:/data
+    environment:
+      FRAMEWEAVE_BIND: 0.0.0.0
+      FRAMEWEAVE_DATA: /data
+    restart: unless-stopped
+    stop_grace_period: 20s

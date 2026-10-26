@@ -1,0 +1,14 @@
+.local/
+.venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+node_modules/
+frontend/dist/
+test-results/
+playwright-report/
+.DS_Store

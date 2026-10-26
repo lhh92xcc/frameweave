@@ -1,0 +1,14 @@
+{
+  "ai-video-generation": {
+    "url": "https://github.com/lhh92xcc/ai-video-generation",
+    "commit": "c5150c3f86ed6c51942c80e81fe05e23745b3f26",
+    "branch": "main",
+    "path": "upstream/ai-video-generation"
+  },
+  "web2api-web": {
+    "url": "https://github.com/lhh92xcc/web2api-web",
+    "commit": "05ace23eddec9684933e0483eb62bd3d6499ddf2",
+    "branch": "main",
+    "path": "upstream/web2api-web"
+  }
+}
