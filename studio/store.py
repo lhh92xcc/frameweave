@@ -44,6 +44,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS artifact_entity ON artifacts(project_id,json_extract(data, '$.kind'),json_extract(data, '$.entity_id'));
                 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, created REAL NOT NULL, message TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS event_job ON events(job_id, id);
             """)
         os.chmod(self.path, 0o600)
 
@@ -118,7 +119,28 @@ class Store:
             )
         return job
 
-    def enqueue(self, project_id, stage, entity_id, snapshot, force=False):
+    def record_import(self, project_id, stage, entity_id, snapshot, effective_prompt):
+        fingerprint = digest(
+            {"project": project_id, "stage": stage, "entity": entity_id, "snapshot": snapshot}
+        )
+        return self.save_job(
+            {
+                "id": uid("job"),
+                "project_id": project_id,
+                "stage": stage,
+                "entity_id": entity_id,
+                "status": "succeeded",
+                "fingerprint": fingerprint,
+                "snapshot": snapshot,
+                "runtime": {"imported": True},
+                "attempt": 1,
+                "created_at": now(),
+                "error": None,
+                "effective_prompt": effective_prompt,
+            }
+        )
+
+    def enqueue(self, project_id, stage, entity_id, snapshot, force=False, retry_of=None):
         fingerprint = digest(
             {"project": project_id, "stage": stage, "entity": entity_id, "snapshot": snapshot}
         )
@@ -131,6 +153,11 @@ class Store:
                 prior = json.loads(row[0])
                 if prior["status"] in {"queued", "running"} or (not force and prior["status"] == "succeeded"):
                     return prior
+                if retry_of and prior.get("retry_of") == retry_of["id"] and prior["status"] == "succeeded":
+                    return prior
+            runtime = {}
+            if retry_of and retry_of["fingerprint"] == fingerprint and retry_of["runtime"].get("calls"):
+                runtime["calls"] = retry_of["runtime"]["calls"]
             job = {
                 "id": uid("job"),
                 "project_id": project_id,
@@ -139,11 +166,13 @@ class Store:
                 "status": "queued",
                 "fingerprint": fingerprint,
                 "snapshot": snapshot,
-                "runtime": {},
+                "runtime": runtime,
                 "attempt": len(rows) + 1,
                 "created_at": now(),
                 "error": None,
             }
+            if retry_of:
+                job["retry_of"] = retry_of["id"]
             db.execute(
                 "INSERT INTO jobs VALUES (?,?,?,?,?)",
                 (job["id"], project_id, "queued", fingerprint, json.dumps(job, ensure_ascii=False)),
@@ -195,3 +224,10 @@ class Store:
                     "SELECT created,message FROM events WHERE job_id=? ORDER BY id", (job_id,)
                 )
             ]
+
+    def latest_event(self, job_id):
+        with self.db() as db:
+            row = db.execute(
+                "SELECT created,message FROM events WHERE job_id=? ORDER BY id DESC LIMIT 1", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None

@@ -108,6 +108,8 @@ class RoutingSettings(StrictModel):
     image: list[Route] = Field(
         default_factory=lambda: [Route(model="gemini-pro")], min_length=1, max_length=6
     )
+    vision: list[Route] = Field(default_factory=lambda: [Route()], min_length=1, max_length=6)
+    image_qc_attempts: int = Field(default=3, ge=1, le=5)
     video: list[Route] = Field(
         default_factory=lambda: [Route(provider="jimeng-web", model="jimeng-seedance-2.0-mini")],
         min_length=1,
@@ -123,11 +125,19 @@ class StageRequest(StrictModel):
     stage: Literal["requirements", "plan", "reference", "keyframe", "video", "audio", "render"]
     entity_id: str = Field(default="", max_length=80)
     force: bool = False
+    reference_source_id: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class ShotReferences(StrictModel):
+    artifact_ids: list[str] = Field(default_factory=list, max_length=9)
+    previous_shot_id: str | None = Field(default=None, max_length=64)
+    expected_version: int = Field(ge=0)
 
 
 class Review(StrictModel):
     approved: bool
     note: str = Field(default="", max_length=2000)
+    expected_review: Literal["pending"] | None = None
 
 
 class PlanEdit(StrictModel):

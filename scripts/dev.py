@@ -41,13 +41,16 @@ def specs():
     )
     engine_env = dict(env, PYTHONPATH=str(ROOT / "upstream/ai-video-generation") + os.pathsep + str(ROOT))
     gateway_env = dict(
-        env, WEB2API_STATE_DIR=str(DATA / "gateway/state"), WEB2API_IMAGES_DIR=str(DATA / "gateway/generated")
+        env,
+        WEB2API_STATE_DIR=str(DATA / "gateway/state"),
+        WEB2API_IMAGES_DIR=str(DATA / "gateway/generated"),
+        PYTHONPATH=str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
     )
     return [
         (
             "gateway",
             Path(os.environ.get("FRAMEWEAVE_GATEWAY_PYTHON", ROOT / ".local/gateway-venv/bin/python")),
-            "server:app",
+            "services.gateway_adapter:app",
             gateway_port,
             ROOT / "upstream/web2api-web",
             gateway_env,

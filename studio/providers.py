@@ -7,6 +7,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -18,6 +19,46 @@ from studio.store import digest
 GATEWAY_URL = os.environ.get("FRAMEWEAVE_GATEWAY", "http://127.0.0.1:8766").rstrip("/")
 ENGINE_URL = os.environ.get("FRAMEWEAVE_ENGINE", "http://127.0.0.1:8767").rstrip("/")
 FREE_PROVIDERS = {"gemini", "bing", "imagefx", "recraft", "leonardo", "seaart", "whisk", "pollinations"}
+UNCERTAIN_GATEWAY_ERRORS = {
+    "upstream_timeout",
+    "upstream_error",
+    "service_stopped",
+    "submission_unknown",
+    "download_failed",
+    "video_download_failed",
+    "remote_result_uncertain",
+}
+
+
+def gateway_result_uncertain(remote):
+    error = remote.get("error") or {}
+    attempts = remote.get("attempts") or []
+    return (
+        (isinstance(error, dict) and str(error.get("code", "")).lower() in UNCERTAIN_GATEWAY_ERRORS)
+        or (remote.get("fallback_provider") == "seedream" and remote.get("status") in {"failed", "cancelled"})
+        or any(
+            isinstance(attempt, dict)
+            and (
+                attempt.get("result_uncertain")
+                or (
+                    isinstance(attempt.get("error"), dict)
+                    and str(attempt["error"].get("code", "")).lower() in UNCERTAIN_GATEWAY_ERRORS
+                )
+            )
+            for attempt in attempts
+        )
+        or bool(remote.get("status") == "failed" and (remote.get("images") or remote.get("videos")))
+    )
+
+
+def requires_verification(job):
+    runtime, error = job.get("runtime") or {}, job.get("error") or {}
+    code = str(error.get("code", "")).lower()
+    return bool(
+        runtime.get("cloud_submitting")
+        or (code == "submission_unknown" and not runtime.get("remote_id"))
+        or code in UNCERTAIN_GATEWAY_ERRORS - {"submission_unknown"}
+    )
 
 
 class ProviderFailure(Exception):
@@ -60,6 +101,26 @@ class Providers:
                 result[key] = []
         return result
 
+    async def gateway_job_status(self, remote_id):
+        try:
+            response = await self.client.get(self.gateway + f"/api/jobs/{remote_id}", timeout=20)
+            response.raise_for_status()
+            remote = response.json()
+            if not isinstance(remote, dict) or remote.get("status") not in {
+                "queued",
+                "waiting",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled",
+            }:
+                raise ValueError("invalid gateway job status")
+            return remote
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ProviderFailure(
+                "GATEWAY_STATUS_UNKNOWN", "无法确认网页网关任务状态；未重新提交，请检查网关后再试"
+            ) from exc
+
     async def is_paid(self, route):
         if route.transport == "cloud":
             return True
@@ -86,8 +147,9 @@ class Providers:
                 "ratio": aspect_ratio,
             }
         )
-        calls = job["runtime"].setdefault("calls", {})
-        if kind == "text" and call_key in calls:
+        call_group = "media_calls" if kind == "image" else "vision_calls" if kind == "vision" else "calls"
+        calls = job["runtime"].setdefault(call_group, {})
+        if kind in {"text", "vision", "image"} and call_key in calls:
             return calls[call_key]
         if job["runtime"].get("active_call") != call_key:
             if job["runtime"].get("cloud_submitting"):
@@ -119,17 +181,21 @@ class Providers:
             try:
                 if route.transport == "gateway":
                     result = await self.gateway_generate(
-                        kind, job, route, index, prompt, refs, duration, aspect_ratio
+                        "text" if kind == "vision" else kind,
+                        job, route, index, prompt, refs, duration, aspect_ratio,
                     )
                 else:
-                    result = await self.cloud_generate(kind, job, route, prompt, refs, aspect_ratio)
-                result["route"] = {
+                    result = await self.cloud_generate(
+                        "text" if kind == "vision" else kind, job, route, prompt, refs, aspect_ratio
+                    )
+                actual = result.pop("actual_route", None)
+                result["route"] = actual or {
                     "transport": route.transport,
                     "provider": route.provider,
                     "model": route.model,
                     "paid": await self.is_paid(route),
                 }
-                if kind != "text":
+                if kind not in {"text", "vision"}:
                     raw, mime = result.pop("content"), result.pop("mime")
                     if not output:
                         raise RuntimeError("Missing artifact output")
@@ -164,7 +230,7 @@ class Providers:
                             path.unlink(missing_ok=True)
                             raise
                     result.update(file=filename, mime=mime)
-                if kind == "text":
+                if kind in {"text", "vision", "image"}:
                     calls[call_key] = result
                 self.checkpoint(
                     job,
@@ -180,7 +246,8 @@ class Providers:
                 self.store.event(job["id"], f"{exc.code}：{exc.message}")
                 if not exc.safe_fallback:
                     raise
-                self.checkpoint(job, route_index=index + 1, remote_id=None, remote_kind=None)
+                if index + 1 < len(routes):
+                    self.checkpoint(job, route_index=index + 1, remote_id=None, remote_kind=None)
         raise last or ProviderFailure("NO_ROUTE", "没有可用模型渠道，请先填写模型配置")
 
     async def gateway_generate(self, kind, job, route, index, prompt, refs, duration, ratio):
@@ -222,7 +289,16 @@ class Providers:
                     response = await self.client.post(self.gateway + "/api/references", files=files)
                     response.raise_for_status()
                     reference_ids = [x["id"] for x in response.json()["data"]]
-                except (httpx.HTTPError, ValueError, KeyError) as exc:
+                    if (
+                        len(reference_ids) != len(refs)
+                        or len(set(reference_ids)) != len(reference_ids)
+                        or any(
+                            not isinstance(id_, str) or not re.fullmatch(r"ref_[a-f0-9]{32}", id_)
+                            for id_ in reference_ids
+                        )
+                    ):
+                        raise ValueError("invalid reference upload response")
+                except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
                     raise ProviderFailure(
                         "REFERENCE_UPLOAD_FAILED", "参考图上传失败；未提交生成请求", True
                     ) from exc
@@ -234,6 +310,7 @@ class Providers:
                         {"role": "user", "content": prompt[i : i + 30000]}
                         for i in range(0, len(prompt), 30000)
                     ],
+                    "reference_images": reference_ids,
                 }
                 path = "/api/chat/jobs"
             elif kind == "image":
@@ -260,12 +337,13 @@ class Providers:
                 }
                 path = "/api/video/jobs"
             try:
+                headers = {"Idempotency-Key": f"frameweave-{job['id']}-{index}-{runtime['active_call'][:16]}"}
+                if kind == "image" and route.provider == "gemini" and job["snapshot"]["allow_paid"]:
+                    headers["X-FrameWeave-Paid-Auth-Fallback"] = "allow"
                 response = await self.client.post(
                     self.gateway + path,
                     json=payload,
-                    headers={
-                        "Idempotency-Key": f"frameweave-{job['id']}-{index}-{runtime['active_call'][:16]}"
-                    },
+                    headers=headers,
                 )
             except httpx.TransportError as exc:
                 raise ProviderFailure(
@@ -306,13 +384,30 @@ class Providers:
                     raise ProviderFailure("EMPTY_MEDIA", "网关任务成功但没有可下载素材")
                 prefix = "/images/" if kind == "image" else "/videos/"
                 raw, mime = await self.download(self.gateway + prefix + paths[0])
+                actual_route = None
+                if kind == "image" and remote.get("fallback_provider") == "seedream":
+                    billing = remote.get("billing")
+                    model = billing.get("model") if isinstance(billing, dict) else None
+                    if not isinstance(model, str) or not re.fullmatch(
+                        r"doubao-seedream-[0-9-]+(?:flash-|lite-)?[0-9]+", model
+                    ):
+                        model = "seedream"
+                    actual_route = {"transport": "gateway", "provider": "seedream", "model": model, "paid": True}
                 return {
                     "content": raw,
                     "mime": mime,
                     "remote_id": remote_id,
                     "attempts": remote.get("attempts", []),
+                    "actual_route": actual_route,
                 }
             if remote["status"] in {"failed", "cancelled"}:
+                if gateway_result_uncertain(remote):
+                    raise ProviderFailure(
+                        "REMOTE_RESULT_UNCERTAIN",
+                        "Seedream 任务失败或结果不明，请先核对火山方舟任务和账单，避免重复扣费"
+                        if remote.get("fallback_provider") == "seedream"
+                        else "网页任务可能已在供应商侧完成，请先核对任务和账单，再单独确认是否重新生成",
+                    )
                 error = remote.get("error") or {}
                 code = error.get("code", "GATEWAY_JOB_FAILED")
                 safe = any(
@@ -328,9 +423,11 @@ class Providers:
                         "rate_limit",
                     )
                 )
-                raise ProviderFailure(
-                    code, "网页任务失败，请在连接设置或原生网关中检查账号、额度与模型权限", safe
-                )
+                message = {
+                    "authentication_failed": "网页账号认证失败，请在连接设置中更新登录信息并重新连接。",
+                    "accounts_unavailable": "没有可用的 Gemini 账号，请在连接设置中更新失效账号或启用其他账号。",
+                }.get(code, "网页任务失败，请在连接设置或原生网关中检查账号、额度与模型权限")
+                raise ProviderFailure(code, message, safe)
             await asyncio.sleep(2)
         raise ProviderFailure("POLL_TIMEOUT", "任务仍未结束，已保存上游任务 ID；稍后重试继续查询，不重复提交")
 
@@ -351,10 +448,19 @@ class Providers:
         headers = {"Authorization": "Bearer " + route.api_key}
         if kind == "text":
             path = "/chat/completions"
+            content = prompt
+            if refs:
+                content = [{"type": "text", "text": prompt}]
+                for ref in refs:
+                    mime = mimetypes.guess_type(ref.name)[0] or "image/png"
+                    encoded = base64.b64encode(ref.read_bytes()).decode("ascii")
+                    content.append(
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+                    )
             kwargs = {
                 "json": {
                     "model": route.model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "user", "content": content}],
                     "temperature": 0.4,
                 }
             }

@@ -161,7 +161,12 @@ onUnmounted(() => {
 </script>
 <template>
   <div class="app-shell">
-    <aside class="sidebar" :class="{ shown: mobileNav }">
+    <aside
+      class="sidebar"
+      :class="{ shown: mobileNav }"
+      aria-label="工作台导航"
+      tabindex="0"
+    >
       <a class="brand" href="#home" @click.prevent="navigate('home')"
         ><span class="brand-mark"><i /><i /><i /></span
         ><span>FrameWeave<small>镜织工坊</small></span></a
@@ -532,9 +537,11 @@ onUnmounted(() => {
         v-else-if="page === 'project' && selected"
         :project="selected"
         :reload="refresh"
+        :worker="health.worker"
         @notify="notify"
         @settings="navigate('settings')"
         @back="navigate('projects')"
+        @jobs="navigate('jobs')"
         @library="openLibrary"
       />
       <SettingsPanel v-else-if="page === 'settings'" @notify="notify" />

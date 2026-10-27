@@ -11,6 +11,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_offline_gateway_auth_failure_fallback_contract(tmp_path):
+    python = ROOT / ".local/gateway-venv/bin/python"
+    if not python.exists():
+        pytest.fail("Run scripts/bootstrap.sh to install isolated gateway dependencies")
+    result = subprocess.run(
+        [str(python), str(ROOT / "tests/gateway_auth_fallback_fixture.py"), str(tmp_path)],
+        cwd=ROOT / "upstream/web2api-web",
+        env={**os.environ, "WEB2API_STATE_DIR": str(tmp_path / "default-state")},
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_engine_parser_and_renderer_contract():
     import inspect
 
@@ -50,6 +65,116 @@ print('Gateway contracts OK')
             **os.environ,
             "WEB2API_STATE_DIR": str(tmp_path / "gateway"),
             "WEB2API_IMAGES_DIR": str(tmp_path / "generated"),
+        },
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_gateway_multi_account_management_and_quota_failover(tmp_path):
+    python = ROOT / ".local/gateway-venv/bin/python"
+    if not python.exists():
+        pytest.fail("Run scripts/bootstrap.sh to install isolated gateway dependencies")
+    script = """
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+from engine import Settings
+from server import create_app
+from storage import GatewayError
+
+class OfflineBackend:
+    calls = []
+
+    def __init__(self, credentials, settings):
+        self.token = credentials.secure_1psid
+        self.ready = False
+
+    async def connect(self):
+        self.ready = True
+        return [{'id': 'gemini-pro', 'available': True}]
+
+    async def chat(self, request, reference_paths=None):
+        self.calls.append(self.token)
+        if self.token == 'offline-first-cookie':
+            raise GatewayError('quota_exceeded', 'offline quota', 429)
+        return 'offline response'
+
+    async def close(self):
+        self.ready = False
+
+async def request(app, method, path, data=None):
+    body = json.dumps(data).encode() if data is not None else b''
+    events = []
+    sent = False
+    async def receive():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {'type': 'http.request', 'body': body, 'more_body': False}
+        await asyncio.Future()
+    async def send(event):
+        events.append(event)
+    scope = {
+        'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.3'},
+        'http_version': '1.1', 'method': method, 'scheme': 'http', 'path': path,
+        'raw_path': path.encode(), 'query_string': b'', 'root_path': '',
+        'headers': [(b'host', b'testserver'), (b'content-type', b'application/json')],
+        'client': ('127.0.0.1', 1234), 'server': ('testserver', 80),
+    }
+    await app(scope, receive, send)
+    status = next(event['status'] for event in events if event['type'] == 'http.response.start')
+    raw = b''.join(event.get('body', b'') for event in events if event['type'] == 'http.response.body')
+    return status, raw.decode(), json.loads(raw)
+
+async def main(root):
+    settings = Settings(root / 'state', root / 'images', retry_cooldown=0.1)
+    app = create_app(settings, OfflineBackend)
+    async with app.router.lifespan_context(app):
+        responses = [
+            await request(app, 'POST', '/api/accounts', {'name': 'Offline 1', 'secure_1psid': 'offline-first-cookie'}),
+            await request(app, 'POST', '/api/accounts', {'name': 'Offline 2', 'secure_1psid': 'offline-second-cookie'}),
+        ]
+        assert all(status == 201 for status, _, _ in responses)
+        first, second = (data['id'] for _, _, data in responses)
+        public = await request(app, 'GET', '/api/accounts')
+        assert len(public[2]['data']) == 2
+        for _, text, _ in [*responses, public]:
+            assert 'offline-first-cookie' not in text and 'offline-second-cookie' not in text
+        assert (settings.state_dir / 'accounts.json').stat().st_mode & 0o777 == 0o600
+        duplicate = await request(app, 'POST', '/api/accounts', {'name': 'duplicate', 'secure_1psid': 'offline-first-cookie'})
+        assert duplicate[0] == 409 and 'offline-first-cookie' not in duplicate[1]
+        assert (await request(app, 'POST', f'/api/accounts/{second}/connect'))[0] == 200
+        disabled = await request(app, 'PUT', f'/api/accounts/{second}', {'name': 'Offline 2', 'enabled': False})
+        enabled = await request(app, 'PUT', f'/api/accounts/{second}', {'name': 'Offline 2', 'enabled': True})
+        assert disabled[2]['enabled'] is False and enabled[2]['enabled'] is True
+        assert app.state.service.accounts.items[first].credentials.secure_1psid == 'offline-first-cookie'
+        assert app.state.service.accounts.items[second].credentials.secure_1psid == 'offline-second-cookie'
+        created = await request(app, 'POST', '/api/chat/jobs', {'messages': [{'role': 'user', 'content': 'offline test'}]})
+        assert created[0] == 202
+        job_id = created[2]['id']
+        for _ in range(500):
+            job = (await request(app, 'GET', f'/api/jobs/{job_id}'))[2]
+            if job['status'] in {'succeeded', 'failed', 'cancelled'}:
+                break
+            await asyncio.sleep(0.01)
+        assert job['status'] == 'succeeded' and job['text'] == 'offline response'
+        assert OfflineBackend.calls == ['offline-first-cookie', 'offline-second-cookie']
+        assert [attempt['account_id'] for attempt in job['attempts']] == [first, second]
+
+asyncio.run(main(Path(sys.argv[1])))
+"""
+    result = subprocess.run(
+        [str(python), "-c", script, str(tmp_path)],
+        cwd=ROOT / "upstream/web2api-web",
+        env={
+            **os.environ,
+            "WEB2API_STATE_DIR": str(tmp_path / "state"),
+            "WEB2API_IMAGES_DIR": str(tmp_path / "images"),
         },
         text=True,
         capture_output=True,

@@ -2,7 +2,11 @@
 import { computed, ref } from "vue";
 import { api, stamp, statusText, type Artifact } from "./api";
 import Icon from "./Icon.vue";
-const props = defineProps<{ artifact: Artifact }>(),
+import ArtifactSource from "./ArtifactSource.vue";
+const props = withDefaults(
+    defineProps<{ artifact: Artifact; reviewAllowed?: boolean }>(),
+    { reviewAllowed: true },
+  ),
   emit = defineEmits<{ close: []; refresh: []; notify: [message: string] }>();
 const note = ref(""),
   busy = ref(false),
@@ -138,16 +142,22 @@ async function prompt() {
               {{ artifact.metadata?.imported?.sha256 }}
             </dd>
           </template>
-          <dt>实际模型</dt>
-          <dd>{{ artifact.route?.provider }} / {{ artifact.route?.model }}</dd>
-          <dt>渠道</dt>
-          <dd>
-            {{
-              artifact.route?.paid
-                ? "付费渠道 · 费用以账单为准"
-                : "网页或本地渠道 · 额度以平台为准"
-            }}
-          </dd>
+          <dt>生成来源</dt>
+          <dd><ArtifactSource :artifact="artifact" /></dd>
+          <template v-if="artifact.kind === 'reference' && artifact.dependencies?.length">
+            <dt>生成依据</dt>
+            <dd>
+              <a
+                :href="'/api/artifacts/' + artifact.dependencies[0] + '/content'"
+                target="_blank"
+                rel="noopener noreferrer"
+                >查看绑定原图</a
+              >
+            </dd>
+          </template>
+          <template v-if="artifact.route?.paid === true && !artifact.archived">
+            <dt>费用</dt><dd>付费渠道 · 费用以账单为准</dd>
+          </template>
           <dt>版本</dt>
           <dd>
             规范 v{{ artifact.contract_revision }} · 分镜 v{{
@@ -183,7 +193,10 @@ async function prompt() {
           }}），已保留文件供下载核对。
         </div>
         <div
-          v-if="artifact.metadata?.aspect_matches === false"
+          v-if="
+            artifact.kind !== 'reference' &&
+            artifact.metadata?.aspect_matches === false
+          "
           class="notice warning"
         >
           <Icon
@@ -193,9 +206,16 @@ async function prompt() {
         <div v-if="artifact.metadata?.duration_warning" class="notice warning">
           {{ artifact.metadata.duration_warning }}
         </div>
+        <details v-if="artifact.metadata?.visual_qc">
+          <summary>自动视觉初检：第 {{ artifact.metadata.visual_qc.attempt }} 次通过（仍需人工审核）</summary>
+          <pre class="prompt-code">{{ JSON.stringify(artifact.metadata.visual_qc.checks, null, 2) }}</pre>
+        </details>
         <p class="muted small">
           请检查人物身份、风格、手部与道具、动作及剧情信息。模型执行成功不代表画面合格。
         </p>
+        <div v-if="!reviewAllowed && !artifact.archived" class="notice">
+          请先批准当前制作规范与分镜，再审核素材。
+        </div>
         <label v-if="!artifact.archived" class="field"
           >审核备注<textarea
             v-model="note"
@@ -207,14 +227,14 @@ async function prompt() {
           <button
             v-if="!artifact.archived"
             class="btn primary"
-            :disabled="busy || artifact.stale"
+            :disabled="busy || artifact.stale || !reviewAllowed"
             @click="review(true)"
           >
             <Icon name="check" :size="16" />批准素材</button
           ><button
             v-if="!artifact.archived"
             class="btn secondary"
-            :disabled="busy || artifact.stale"
+            :disabled="busy || artifact.stale || !reviewAllowed"
             @click="review(false)"
           >
             需要返工</button

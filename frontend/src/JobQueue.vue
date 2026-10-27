@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { api, statusText, stageText, stamp, type Job } from "./api";
+import {
+  api,
+  jobErrorMessage,
+  requiresVerification,
+  statusText,
+  stageText,
+  stamp,
+  type Job,
+} from "./api";
 import Icon from "./Icon.vue";
 const emit = defineEmits<{ notify: [message: string]; refresh: [] }>(),
   jobs = ref<Job[]>([]),
@@ -28,12 +36,18 @@ async function load() {
 }
 async function action(job: Job, name: string) {
   try {
-    await api("/jobs/" + job.id + "/" + name, "POST");
+    const result = await api<Job>("/jobs/" + job.id + "/" + name, "POST");
     await load();
     emit("refresh");
     emit(
       "notify",
-      name === "retry" ? "任务已恢复或重新入队" : "取消请求已记录",
+      name !== "retry"
+        ? "取消请求已记录"
+        : result.id === job.id
+          ? "已继续查询已有任务，不会重复提交"
+          : result.status === "succeeded"
+            ? "该重试任务已完成，请查看结果"
+            : "已安排新的重试任务，请查看进度",
     );
   } catch (e: any) {
     error.value = e.message;
@@ -122,7 +136,7 @@ onUnmounted(() => clearInterval(timer));
                   ><small>{{ j.entity_id || j.project_id }}</small></span
                 >
               </button>
-              <p v-if="j.error" class="job-error">{{ j.error.message }}</p>
+              <p v-if="j.error" class="job-error">{{ jobErrorMessage(j) }}</p>
             </td>
             <td>
               <span :class="['badge', j.status]">{{
@@ -137,6 +151,12 @@ onUnmounted(() => clearInterval(timer));
                 ><button
                   v-if="['failed', 'blocked', 'cancelled'].includes(j.status)"
                   class="text-button"
+                  :disabled="requiresVerification(j)"
+                  :title="
+                    requiresVerification(j)
+                      ? '请先核对供应商任务和账单'
+                      : undefined
+                  "
                   @click="action(j, 'retry')"
                 >
                   <Icon name="refresh" :size="14" />重试</button
@@ -177,7 +197,7 @@ onUnmounted(() => clearInterval(timer));
         <code>{{ detail.id }}</code>
         <div v-if="detail.error" class="notice warning">
           <Icon name="warning" /><span
-            >{{ detail.error.message
+            >{{ jobErrorMessage(detail)
             }}<small class="block">{{ detail.error.code }}</small></span
           >
         </div>
@@ -188,20 +208,33 @@ onUnmounted(() => clearInterval(timer));
           </div>
           <p v-if="!detail.events?.length" class="muted">任务尚未执行。</p>
         </div>
+        <details v-if="detail.runtime?.image_qc_attempts?.length">
+          <summary>自动视觉质检与候选图（{{ detail.runtime.image_qc_attempts.length }} 次）</summary>
+          <div v-for="attempt in detail.runtime.image_qc_attempts" :key="attempt.attempt">
+            <p>第 {{ attempt.attempt }} 次 · {{ attempt.passed ? '初检通过，仍需人工审核' : '未通过' }}</p>
+            <a :href="`/api/jobs/${detail.id}/image-attempts/${attempt.attempt}`" target="_blank" rel="noopener">查看候选原图</a>
+            <pre class="prompt-code">{{ JSON.stringify(attempt.qc, null, 2) }}</pre>
+            <details><summary>本次生图提示词</summary><pre class="prompt-code">{{ attempt.prompt }}</pre></details>
+          </div>
+        </details>
+        <p v-if="detail.runtime?.pending_qc_image" class="notice warning">
+          候选图已生成但质检未完成，未进入人工审核。
+          <a :href="`/api/jobs/${detail.id}/image-attempts/${detail.runtime.pending_qc_image.attempt}`" target="_blank" rel="noopener">查看候选图</a>
+        </p>
         <details>
           <summary>输入快照与完整提示词</summary>
           <pre class="prompt-code">{{
             detail.effective_prompt || JSON.stringify(detail.snapshot, null, 2)
           }}</pre>
         </details>
-        <div v-if="detail.runtime?.cloud_submitting" class="notice warning">
-          该云请求结果不明。请先在供应商侧核对任务与账单；确认需要新请求后，在项目对应步骤中点击“重新生成”。
+        <div v-if="requiresVerification(detail)" class="notice warning">
+          该请求结果不明。请先在供应商侧核对任务与账单；确认需要新请求后，在项目对应步骤中点击“重新生成”。
         </div>
         <div class="button-row">
           <button
             v-if="['failed', 'blocked', 'cancelled'].includes(detail.status)"
             class="btn primary"
-            :disabled="detail.runtime?.cloud_submitting"
+            :disabled="requiresVerification(detail)"
             @click="action(detail, 'retry')"
           >
             继续 / 重试

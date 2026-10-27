@@ -22,7 +22,7 @@ class SettingsStore:
     @staticmethod
     def public(settings):
         data = settings.model_dump()
-        for route in [*data["text"], *data["image"], *data["video"], data["audio"]]:
+        for route in [*data["text"], *data["image"], *data["vision"], *data["video"], data["audio"]]:
             route["configured"] = bool(route.pop("api_key"))
             route.pop("clear_key", None)
         return data
@@ -30,7 +30,7 @@ class SettingsStore:
     def save(self, value: RoutingSettings):
         previous = self.get().model_dump()
         data = value.model_dump()
-        for kind in ["text", "image", "video", "audio"]:
+        for kind in ["text", "image", "vision", "video", "audio"]:
             entries = [data[kind]] if kind == "audio" else data[kind]
             old_entries = [previous[kind]] if kind == "audio" else previous[kind]
             for route in entries:

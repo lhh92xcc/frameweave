@@ -10,6 +10,7 @@ import {
 } from "./api";
 import Icon from "./Icon.vue";
 import MediaDetail from "./MediaDetail.vue";
+import ArtifactSource from "./ArtifactSource.vue";
 const emit = defineEmits<{ notify: [message: string] }>(),
   artifacts = ref<Artifact[]>([]),
   filter = ref("all"),
@@ -337,6 +338,7 @@ onMounted(load);
           <h3 :title="a.title || a.entity_id">
             {{ a.metadata?.curation?.display_title || a.title || a.entity_id }}
           </h3>
+          <ArtifactSource :artifact="a" />
           <p>{{ a.project_title }} · {{ stageText[a.kind] }}</p>
           <span v-if="a.storage" class="muted small"
             >腾讯云 COS · 原文件已校验</span

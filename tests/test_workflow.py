@@ -1,6 +1,7 @@
 import io
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 from conftest import SOURCE, approve_with_plan, plan_for
@@ -115,6 +116,32 @@ def test_review_dependencies_and_new_reference_invalidates_downstream(app, clien
     assert client.post(f"/api/artifacts/{video['id']}/review", json={"approved": True}).status_code == 409
 
 
+def test_review_expected_pending_prevents_overwriting_concurrent_decisions(app, client, project):
+    approved = approve_with_plan(client, project)
+    workflow = app.state.workflow
+    reference = add_artifact(workflow, approved, "reference", "lin")
+    url = f"/api/artifacts/{reference['id']}/review"
+    first = client.post(url, json={"approved": False, "note": "修改眼睛", "expected_review": "pending"})
+    assert first.status_code == 200 and first.json()["review"] == "rejected"
+    concurrent = client.post(url, json={"approved": True, "expected_review": "pending"})
+    assert concurrent.status_code == 409
+    assert workflow.store.artifact(reference["id"])["review_note"] == "修改眼睛"
+    assert client.post(url, json={"approved": True}).status_code == 200
+
+
+def test_review_expected_pending_does_not_bypass_version_or_approval_guards(app, client, project):
+    workflow = app.state.workflow
+    approved = approve_with_plan(client, project)
+    old = add_artifact(workflow, approved, "reference", "lin")
+    current = add_artifact(workflow, approved, "reference", "lin")
+    body = {"approved": True, "expected_review": "pending"}
+    assert client.post(f"/api/artifacts/{old['id']}/review", json=body).status_code == 409
+    approved["plan_approved"] = False
+    workflow.store.save_project(approved)
+    assert client.post(f"/api/artifacts/{current['id']}/review", json=body).status_code == 422
+    assert workflow.store.artifact(current["id"])["review"] == "pending"
+
+
 def test_job_idempotency_and_paused_projects(app, client, project):
     id_ = project["id"]
     a = client.post(f"/api/projects/{id_}/jobs", json={"stage": "requirements"}).json()
@@ -137,7 +164,7 @@ def test_saved_settings_are_write_only_and_origin_scoped(client, app):
             "api_key": "test-secret-never-return",
         }
     ]
-    for kind in ["image", "video"]:
+    for kind in ["image", "vision", "video"]:
         for r in data[kind]:
             r.pop("configured", None)
     data["audio"].pop("configured", None)
@@ -147,7 +174,7 @@ def test_saved_settings_are_write_only_and_origin_scoped(client, app):
     assert "test-secret-never-return" not in client.get("/api/settings").text
     assert (app.state.store.root / "settings.json").stat().st_mode & 0o777 == 0o600
     keep = response.json()
-    for kind in ["text", "image", "video", "audio"]:
+    for kind in ["text", "image", "vision", "video", "audio"]:
         for route in [keep[kind]] if kind == "audio" else keep[kind]:
             route.pop("configured", None)
     assert client.put("/api/settings", json=keep).status_code == 200
@@ -264,8 +291,6 @@ async def test_long_source_reads_every_segment_then_reduces_without_truncation(a
 
 
 def test_uploaded_reference_passes_real_api_route_and_review(client, project):
-    from pathlib import Path
-
     p = approve_with_plan(client, project)
     response = client.post(
         f"/api/projects/{p['id']}/upload",
@@ -284,3 +309,352 @@ def test_uploaded_reference_passes_real_api_route_and_review(client, project):
     assert artifact["metadata"]["width"] == 160
     assert client.post(f"/api/artifacts/{artifact['id']}/review", json={"approved": True}).status_code == 200
     assert client.get(f"/api/artifacts/{artifact['id']}/content").content.startswith(b"\x89PNG")
+
+
+def test_offline_reference_source_binding_validation_and_version_guards(app, client, project):
+    p = approve_with_plan(client, project)
+    workflow = app.state.workflow
+    raw = (Path(__file__).parent / "fixtures/reference.png").read_bytes()
+    upload = client.post(
+        f"/api/projects/{p['id']}/upload",
+        data={"stage": "reference", "entity_id": "lin"},
+        files={"file": ("reference.png", raw, "image/png")},
+    ).json()
+    request = {"stage": "reference", "entity_id": "lin", "force": True}
+    assert client.post(f"/api/projects/{p['id']}/jobs", json=request).status_code == 422
+    assert client.post(f"/api/artifacts/{upload['id']}/review", json={"approved": True}).status_code == 200
+    response = client.post(f"/api/projects/{p['id']}/jobs", json=request)
+    assert response.status_code == 202, response.text
+    job = response.json()
+    assert job["snapshot"]["dependencies"] == [upload["id"]]
+    assert job["snapshot"]["reference_base_id"] == upload["id"]
+    assert client.post(f"/api/projects/{p['id']}/jobs", json=request).json()["id"] == job["id"]
+
+    wrong_entity = add_artifact(workflow, p, "reference", "other", review="approved")
+    wrong_project = add_artifact(
+        workflow, {**p, "id": "another-project"}, "reference", "lin", review="approved"
+    )
+    for invalid in (wrong_entity, wrong_project, {**upload, "id": "missing"}):
+        response = client.post(
+            f"/api/projects/{p['id']}/jobs", json={**request, "reference_source_id": invalid["id"]}
+        )
+        assert response.status_code in {404, 422}
+    assert (
+        client.post(
+            f"/api/projects/{p['id']}/jobs",
+            json={"stage": "keyframe", "entity_id": "ep1_s01", "reference_source_id": upload["id"]},
+        ).status_code
+        == 422
+    )
+
+    candidate = add_artifact(workflow, p, "reference", "lin")
+    with pytest.raises(Exception, match="当前素材已变化"):
+        workflow.assert_current(job)
+    new_job = workflow.enqueue(p["id"], "reference", "lin", force=True)
+    assert new_job["snapshot"]["dependencies"] == [upload["id"]]
+    assert new_job["snapshot"]["reference_base_id"] == candidate["id"]
+    changed_source = workflow.store.artifact(upload["id"])
+    changed_source["review"] = "rejected"
+    workflow.store.save_artifact(changed_source)
+    with pytest.raises(Exception, match="参考原图或审核状态已变化"):
+        workflow.assert_current(new_job)
+    assert client.post(f"/api/projects/{p['id']}/jobs", json=request).status_code == 422
+
+    changed_source["review"] = "approved"
+    workflow.store.save_artifact(changed_source)
+    updated = workflow.store.project(p["id"])
+    updated["plan_revision"] += 1
+    workflow.store.save_project(updated)
+    with pytest.raises(Exception, match="规范或分镜已变化"):
+        workflow.assert_current(new_job)
+    assert client.post(f"/api/projects/{p['id']}/jobs", json=request).status_code == 422
+    assert (
+        client.post(
+            f"/api/projects/{p['id']}/jobs", json={**request, "reference_source_id": upload["id"]}
+        ).status_code
+        == 422
+    )
+
+
+@pytest.mark.asyncio
+async def test_offline_reference_job_checks_stale_source_before_model_submission(
+    app, client, project, monkeypatch
+):
+    p = approve_with_plan(client, project)
+    workflow = app.state.workflow
+    source = add_artifact(workflow, p, "reference", "lin", review="approved")
+    job = workflow.enqueue(p["id"], "reference", "lin", reference_source_id=source["id"])
+    source["review"] = "rejected"
+    workflow.store.save_artifact(source)
+    calls = []
+
+    async def generate(*args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(workflow.providers, "generate", generate)
+    await workflow.execute(job)
+    assert workflow.store.job(job["id"])["error"]["code"] == "STALE_DEPENDENCY"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_offline_legacy_reference_job_does_not_ignore_newly_uploaded_source(app, client, project):
+    p = approve_with_plan(client, project)
+    workflow = app.state.workflow
+    job = workflow.enqueue(p["id"], "reference", "lin")
+    del job["snapshot"]["reference_base_id"]
+    workflow.store.save_job(job)
+    raw = (Path(__file__).parent / "fixtures/reference.png").read_bytes()
+    client.post(
+        f"/api/projects/{p['id']}/upload",
+        data={"stage": "reference", "entity_id": "lin"},
+        files={"file": ("reference.png", raw, "image/png")},
+    )
+    await workflow.execute(job)
+    assert workflow.store.job(job["id"])["error"]["code"] == "STALE_DEPENDENCY"
+
+
+def test_user_reference_can_be_uploaded_before_approval_but_not_reviewed(client, project):
+    plan = plan_for(project)
+    result = client.put(
+        f"/api/projects/{project['id']}/plan",
+        json={"plan": plan, "expected_revision": project["plan_revision"]},
+    )
+    assert result.status_code == 200, result.text
+    response = client.post(
+        f"/api/projects/{project['id']}/upload",
+        data={"stage": "reference", "entity_id": "lin"},
+        files={
+            "file": (
+                "reference.png",
+                (Path(__file__).parent / "fixtures/reference.png").read_bytes(),
+                "image/png",
+            )
+        },
+    )
+    assert response.status_code == 201, response.text
+    artifact = response.json()
+    assert artifact["review"] == "pending"
+    assert artifact["route"]["provider"] == "user-upload"
+    assert artifact["contract_hash"] == project["contract"]["hash"]
+    assert artifact["plan_revision"] == 1
+    assert client.get(f"/api/artifacts/{artifact['id']}/content").content.startswith(b"\x89PNG")
+    assert (
+        client.post(f"/api/artifacts/{artifact['id']}/review", json={"approved": True}).status_code == 422
+    )
+    for stage, entity in [("reference", "lin"), ("keyframe", "ep1_s01")]:
+        assert (
+            client.post(
+                f"/api/projects/{project['id']}/jobs", json={"stage": stage, "entity_id": entity}
+            ).status_code
+            == 422
+        )
+    assert (
+        client.post(
+            f"/api/projects/{project['id']}/upload",
+            data={"stage": "keyframe", "entity_id": "ep1_s01"},
+            files={"file": ("reference.png", (Path(__file__).parent / "fixtures/reference.png").read_bytes())},
+        ).status_code
+        == 422
+    )
+    current = client.get(f"/api/projects/{project['id']}").json()
+    assert current["automation"] is False
+    assert current["contract"]["approved"] is False and current["plan_approved"] is False
+    assert len(current["jobs"]) == 1 and current["jobs"][0]["status"] == "succeeded"
+    imported_job = client.get(f"/api/jobs/{current['jobs'][0]['id']}").json()
+    assert imported_job["runtime"]["imported"] is True
+    assert imported_job["snapshot"]["contract"]["approved"] is False
+    assert client.post(
+        f"/api/projects/{project['id']}/contract/approve", json={"hash": project["contract"]["hash"]}
+    ).status_code == 200
+    assert client.post(f"/api/projects/{project['id']}/plan/approve", json={"revision": 1}).status_code == 200
+    assert client.post(f"/api/artifacts/{artifact['id']}/review", json={"approved": True}).status_code == 200
+    generated = client.post(
+        f"/api/projects/{project['id']}/jobs", json={"stage": "keyframe", "entity_id": "ep1_s01"}
+    )
+    assert generated.status_code == 202
+    assert generated.json()["snapshot"]["contract"]["approved"] is True
+    assert generated.json()["snapshot"]["dependencies"] == [artifact["id"]]
+    revised = client.put(
+        f"/api/projects/{project['id']}/contract",
+        json={"markdown": project["contract"]["markdown"] + "\n新版本", "expected_revision": 0},
+    )
+    assert revised.status_code == 200
+    current = client.get(f"/api/projects/{project['id']}").json()
+    assert next(item for item in current["artifacts"] if item["id"] == artifact["id"])["stale"]
+    assert (
+        client.post(
+            f"/api/projects/{project['id']}/upload",
+            data={"stage": "reference", "entity_id": "lin"},
+            files={"file": ("reference.png", (Path(__file__).parent / "fixtures/reference.png").read_bytes())},
+        ).status_code
+        == 422
+    )
+
+
+async def test_automation_reports_batch_failures_without_automatic_resubmission(app, client, project):
+    p = approve_with_plan(client, project)
+    plan = plan_for(p)
+    plan["assets"].append(
+        {
+            "id": "bird",
+            "name": "机械鸟",
+            "kind": "prop",
+            "description": "一只精致的黄铜机械鸟",
+            "prompt": "黄铜机械鸟的完整参考图",
+        }
+    )
+    edited = client.put(
+        f"/api/projects/{p['id']}/plan", json={"plan": plan, "expected_revision": p["plan_revision"]}
+    )
+    assert edited.status_code == 200, edited.text
+    assert client.post(f"/api/projects/{p['id']}/plan/approve", json={"revision": 2}).status_code == 200
+    client.post(f"/api/projects/{p['id']}/automation", json={"enabled": True})
+    workflow = app.state.workflow
+    p = workflow.store.project(p["id"])
+    assert workflow.automation_state(p)["state"] == "scheduling"
+    await workflow.advance(p)
+    jobs = {job["entity_id"]: job for job in workflow.store.jobs(p["id"])}
+    assert set(jobs) == {"lin", "bird"}
+    assert client.get(f"/api/projects/{p['id']}").json()["automation_status"]["state"] == "queued"
+
+    running = jobs["lin"]
+    running["status"] = "running"
+    workflow.store.save_job(running)
+    workflow.store.event(running["id"], "开始生成")
+    workflow.store.event(running["id"], "正在等待网页网关")
+    view = client.get(f"/api/projects/{p['id']}").json()
+    assert view["automation_status"]["state"] == "running"
+    assert view["jobs"][0]["latest_event"]["message"] == "正在等待网页网关"
+    assert "snapshot" not in view["jobs"][0]
+
+    running.update(status="blocked", error={"code": "NO_ROUTE", "message": "没有可用模型渠道"})
+    workflow.store.save_job(running)
+    successful = jobs["bird"]
+    successful["status"] = "succeeded"
+    workflow.store.save_job(successful)
+    add_artifact(workflow, p, "reference", "bird")
+    view = client.get(f"/api/projects/{p['id']}").json()
+    assert view["jobs"][0]["status"] == "succeeded"
+    assert view["automation_status"] == {
+        "state": "attention", "stage": "reference", "job_ids": [running["id"]]
+    }
+    await workflow.advance(p)
+    assert len(workflow.store.jobs(p["id"])) == 2
+
+    retried = client.post(f"/api/jobs/{running['id']}/retry")
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["id"] != running["id"]
+    assert client.get(f"/api/projects/{p['id']}").json()["automation_status"]["state"] == "queued"
+    retried_job = workflow.store.job(retried.json()["id"])
+    retried_job["status"] = "succeeded"
+    workflow.store.save_job(retried_job)
+    reference = add_artifact(workflow, p, "reference", "lin")
+    assert client.get(f"/api/projects/{p['id']}").json()["automation_status"] == {
+        "state": "review", "stage": "reference"
+    }
+    reference["review"] = "rejected"
+    workflow.store.save_artifact(reference)
+    assert client.get(f"/api/projects/{p['id']}").json()["automation_status"] == {
+        "state": "rework", "stage": "reference"
+    }
+
+
+async def test_automation_scheduling_failure_is_visible_safe_and_retryable(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    client.post(f"/api/projects/{project['id']}/automation", json={"enabled": True})
+    p = workflow.store.project(project["id"])
+    original = workflow.enqueue
+
+    def fail_enqueue(*args, **kwargs):
+        raise ValueError("请先批准当前制作规范")
+
+    monkeypatch.setattr(workflow, "enqueue", fail_enqueue)
+    await workflow.advance_safely(p)
+    view = client.get(f"/api/projects/{p['id']}").json()
+    assert view["automation_status"] == {
+        "state": "error",
+        "error": {"code": "SCHEDULING_FAILED", "message": "请先批准当前制作规范"},
+    }
+    monkeypatch.setattr(workflow, "enqueue", original)
+    await workflow.advance_safely(workflow.store.project(p["id"]))
+    assert workflow.store.jobs(p["id"]) == []
+    client.post(f"/api/projects/{p['id']}/automation", json={"enabled": True})
+    await workflow.advance_safely(workflow.store.project(p["id"]))
+    assert client.get(f"/api/projects/{p['id']}").json()["automation_status"]["state"] == "queued"
+
+
+async def test_automation_does_not_expose_unexpected_scheduling_errors(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    client.post(f"/api/projects/{project['id']}/automation", json={"enabled": True})
+
+    def fail_enqueue(*args, **kwargs):
+        raise ValueError("private-credential-in-validation-error")
+
+    monkeypatch.setattr(workflow, "enqueue", fail_enqueue)
+    await workflow.advance_safely(workflow.store.project(project["id"]))
+    response = client.get(f"/api/projects/{project['id']}")
+    assert response.json()["automation_status"]["state"] == "error"
+    assert "private-credential-in-validation-error" not in response.text
+
+
+async def test_automation_reports_successful_job_with_missing_result(app, client, project):
+    p = approve_with_plan(client, project)
+    workflow = app.state.workflow
+    job = workflow.enqueue(p["id"], "reference", "lin")
+    job["status"] = "succeeded"
+    workflow.store.save_job(job)
+    client.post(f"/api/projects/{p['id']}/automation", json={"enabled": True})
+    await workflow.advance_safely(workflow.store.project(p["id"]))
+    state = client.get(f"/api/projects/{p['id']}").json()["automation_status"]
+    assert state["state"] == "error"
+    assert "当前结果不可用" in state["error"]["message"]
+    assert len(workflow.store.jobs(p["id"])) == 1
+
+
+async def test_automation_uses_latest_attempt_not_last_database_update(app, client, project):
+    p = approve_with_plan(client, project)
+    workflow = app.state.workflow
+    older = workflow.enqueue(p["id"], "reference", "lin")
+    snapshot = {**older["snapshot"], "settings_fingerprint": "changed-settings"}
+    newer = workflow.store.enqueue(p["id"], "reference", "lin", snapshot)
+    newer.update(status="blocked", error={"code": "NO_ROUTE", "message": "没有可用模型渠道"})
+    workflow.store.save_job(newer)
+    older["status"] = "succeeded"
+    workflow.store.save_job(older)
+    client.post(f"/api/projects/{p['id']}/automation", json={"enabled": True})
+    state = client.get(f"/api/projects/{p['id']}").json()["automation_status"]
+    assert state == {"state": "attention", "stage": "reference", "job_ids": [newer["id"]]}
+    await workflow.advance(workflow.store.project(p["id"]))
+    assert len(workflow.store.jobs(p["id"])) == 2
+
+
+async def test_older_failed_requirement_does_not_block_approved_plan(app, client, project):
+    workflow = app.state.workflow
+    old_job = workflow.enqueue(project["id"], "requirements")
+    old_job.update(status="blocked", error={"code": "GATEWAY_REJECTED", "message": "网关未接受请求"})
+    workflow.store.save_job(old_job)
+    p = approve_with_plan(client, project)
+    client.post(f"/api/projects/{p['id']}/automation", json={"enabled": True})
+    state = client.get(f"/api/projects/{p['id']}").json()["automation_status"]
+    assert state == {"state": "scheduling", "stage": "reference", "entity_ids": ["lin"]}
+    await workflow.advance(workflow.store.project(p["id"]))
+    jobs = workflow.store.jobs(p["id"])
+    assert any(job["stage"] == "reference" and job["status"] == "queued" for job in jobs)
+    assert workflow.store.job(old_job["id"])["status"] == "blocked"
+
+
+def test_queue_marks_uncertain_requests_without_exposing_runtime(app, client, project):
+    workflow = app.state.workflow
+    job = workflow.enqueue(project["id"], "requirements")
+    job.update(status="blocked", runtime={"cloud_submitting": True, "secret": "private-runtime-value"})
+    workflow.store.save_job(job)
+    response = client.get("/api/jobs")
+    assert response.json()[0]["verification_required"] is True
+    assert "runtime" not in response.json()[0]
+    assert "private-runtime-value" not in response.text
+    job.update(
+        error={"code": "SUBMISSION_UNKNOWN", "message": "请核对"}, runtime={"remote_id": "remote-123"}
+    )
+    workflow.store.save_job(job)
+    assert client.get("/api/jobs").json()[0]["verification_required"] is False

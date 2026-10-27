@@ -4,12 +4,27 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import Icon from "./Icon.vue";
 import MediaDetail from "./MediaDetail.vue";
-import { api, statusText, stageText, type Artifact, type Project } from "./api";
-const props = defineProps<{ project: Project; reload: () => Promise<void> }>(),
+import ArtifactSource from "./ArtifactSource.vue";
+import ProjectActivity from "./ProjectActivity.vue";
+import {
+  api,
+  jobErrorMessage,
+  requiresVerification,
+  statusText,
+  stageText,
+  type Artifact,
+  type Project,
+} from "./api";
+const props = defineProps<{
+    project: Project;
+    reload: () => Promise<void>;
+    worker?: boolean;
+  }>(),
   emit = defineEmits<{
     notify: [message: string];
     settings: [];
     back: [];
+    jobs: [];
     library: [projectId: string];
   }>();
 const fileInput = ref<HTMLInputElement>(),
@@ -22,10 +37,17 @@ const stage = ref("requirements"),
   busy = ref(false),
   error = ref(""),
   detail = ref<Artifact | null>(null),
+  referenceShot = ref<any>(null),
+  extraReferences = ref<string[]>([]),
+  previousShot = ref(""),
   editShot = ref<any>(null),
   planJson = ref(""),
   showJson = ref(false),
-  sourceOpen = ref(false);
+  sourceOpen = ref(false),
+  selectedReviewIds = ref<string[]>([]),
+  batchNote = ref(""),
+  batchError = ref(""),
+  batchProgress = ref("");
 watch(
   () => props.project.contract.markdown,
   (v, old) => {
@@ -50,8 +72,7 @@ const dirty = computed(
 const shots = computed(
     () => p.value.plan?.episodes.flatMap((e: any) => e.shots) || [],
   ),
-  episode = computed(() => p.value.plan?.episodes[episodeIndex.value]),
-  activeJob = computed(() => p.value.jobs.find((j) => j.status === "running"));
+  episode = computed(() => p.value.plan?.episodes[episodeIndex.value]);
 const stageDescription: Record<string, string> = {
   requirements: "一份规范，贯穿每一次生成。先把故事、视觉和交付要求写清楚。",
   plan: "先看全局，再看每一镜。核对来源章节、素材绑定和镜头时长。",
@@ -70,13 +91,83 @@ const entities = computed(() =>
       ? p.value.plan?.episodes || []
       : episode.value?.shots || [],
 );
+const mediaSummary = computed(() => {
+  const results = entities.value.map((entity: any) =>
+    artifact(activeKind.value, entity.id),
+  );
+  return {
+    available: results.filter(Boolean).length,
+    pending: results.filter(
+      (result: Artifact | undefined) => result?.review === "pending",
+    ).length,
+    approved: results.filter(
+      (result: Artifact | undefined) => result?.review === "approved",
+    ).length,
+  };
+});
 function artifact(kind: string, id: string) {
   return p.value.artifacts.find(
     (a) => a.kind === kind && a.entity_id === id && !a.stale,
   );
 }
+function openReferences(shot: any) {
+  referenceShot.value = shot;
+  const binding = p.value.shot_reference_bindings?.[shot.id];
+  extraReferences.value = [...(binding?.artifact_ids || [])];
+  previousShot.value = binding?.previous_shot_id || "";
+}
+const eligibleReferences = computed(() => p.value.artifacts.filter((item) =>
+  referenceShot.value && item.kind === "reference" && !item.archived &&
+  item.review === "approved" && item.contract_revision === p.value.contract.revision &&
+  item.plan_revision === p.value.plan_revision && referenceShot.value.asset_ids.includes(item.entity_id),
+));
+const previousShots = computed(() => {
+  const index = shots.value.findIndex((shot: any) => shot.id === referenceShot.value?.id);
+  return shots.value.slice(0, Math.max(index, 0)).filter((shot: any) => artifact("keyframe", shot.id)?.review === "approved");
+});
+async function saveReferences() {
+  await action(() => api(`/projects/${p.value.id}/shots/${referenceShot.value.id}/references`, "PUT", {
+    artifact_ids: extraReferences.value,
+    previous_shot_id: previousShot.value || null,
+    expected_version: p.value.version,
+  }), "镜头参考绑定已更新，受影响的关键帧及下游审核失效。");
+  if (!error.value) referenceShot.value = null;
+}
+function referenceSource(id: string) {
+  return p.value.artifacts
+    .filter(
+      (a) =>
+        a.kind === "reference" &&
+        a.entity_id === id &&
+        !a.archived &&
+        a.route?.provider === "user-upload" &&
+        a.contract_revision === p.value.contract.revision &&
+        a.plan_revision === p.value.plan_revision,
+    )
+    .sort((first, second) => second.created_at - first.created_at)[0];
+}
+function hasOlderReferenceSource(id: string) {
+  return p.value.artifacts.some(
+    (a) =>
+      a.kind === "reference" &&
+      a.entity_id === id &&
+      !a.archived &&
+      a.route?.provider === "user-upload",
+  );
+}
 function jobState(kind: string, id = "") {
-  return p.value.jobs.find((j) => j.stage === kind && j.entity_id === id);
+  const jobs = p.value.jobs.filter(
+    (j) => j.stage === kind && j.entity_id === id,
+  );
+  return (
+    jobs.find((job) => job.status === "running") ||
+    jobs.find((job) => job.status === "queued") ||
+    jobs.reduce<(typeof jobs)[number] | undefined>(
+      (latest, job) =>
+        !latest || job.created_at > latest.created_at ? job : latest,
+      undefined,
+    )
+  );
 }
 async function action(fn: () => Promise<any>, message?: string) {
   busy.value = true;
@@ -93,6 +184,13 @@ async function action(fn: () => Promise<any>, message?: string) {
   }
 }
 async function generate(kind: string, id = "", force = false) {
+  if (
+    requiresVerification(jobState(kind, id)) &&
+    !window.confirm(
+      "上次提交结果不明，重新生成可能重复扣费。请先在供应商侧核对任务和账单；确认已核对并需要重新生成吗？",
+    )
+  )
+    return;
   await action(
     () =>
       api("/projects/" + p.value.id + "/jobs", "POST", {
@@ -106,6 +204,15 @@ async function generate(kind: string, id = "", force = false) {
 async function generateAll() {
   const kind = activeKind.value;
   await action(async () => {
+    const uncertain = entities.value.find(
+      (entity: any) =>
+        !artifact(kind, entity.id) &&
+        requiresVerification(jobState(kind, entity.id)),
+    );
+    if (uncertain)
+      throw new Error(
+        `${uncertain.name || uncertain.title || uncertain.id} 的上次提交结果不明；请先核对供应商记录，再单独确认重新生成。`,
+      );
     for (const e of entities.value) {
       if (!artifact(kind, e.id))
         await api("/projects/" + p.value.id + "/jobs", "POST", {
@@ -208,6 +315,75 @@ async function upload(event: Event) {
 const readyForMedia = computed(
   () => p.value.contract.approved && p.value.plan_approved,
 );
+const canShowReference = computed(
+  () =>
+    activeKind.value === "reference" &&
+    !!p.value.plan &&
+    p.value.plan_contract_hash === p.value.contract.hash,
+);
+const canBrowseMedia = computed(
+  () => readyForMedia.value || canShowReference.value,
+);
+const canBatchReview = computed(
+  () => ["reference", "keyframe"].includes(activeKind.value) && readyForMedia.value,
+);
+const reviewCandidates = computed<{ id: string; name: string }[]>(() =>
+  entities.value.flatMap((entity: any) => {
+    const item = artifact(activeKind.value, entity.id);
+    return item && !item.archived && item.review === "pending"
+      ? [{ id: item.id, name: entity.name || entity.title || entity.id }]
+      : [];
+  }),
+);
+const selectedReviews = computed(() =>
+  reviewCandidates.value.filter((item: { id: string }) => selectedReviewIds.value.includes(item.id)),
+);
+watch([() => p.value.id, activeKind, episodeIndex], () => {
+  selectedReviewIds.value = [];
+  batchNote.value = "";
+  batchError.value = "";
+  batchProgress.value = "";
+});
+async function reviewSelected(approved: boolean) {
+  const items = [...selectedReviews.value];
+  if (!items.length || busy.value) return;
+  const decision = approved ? "批准" : "标记为需返工";
+  const warning = approved && p.value.automation && !p.value.paused && !p.value.cancelled
+    ? "\n项目已开启自动推进，批准后可能继续生成并产生费用。"
+    : "";
+  if (!window.confirm(`确认将选中的 ${items.length} 项${decision}？${warning}`)) return;
+  busy.value = true;
+  batchError.value = "";
+  const failures: string[] = [];
+  const completed: string[] = [];
+  try {
+    for (const [index, item] of items.entries()) {
+      batchProgress.value = `审核中 ${index + 1} / ${items.length}`;
+      try {
+        await api(`/artifacts/${item.id}/review`, "POST", {
+          approved,
+          note: batchNote.value,
+          expected_review: "pending",
+        });
+        completed.push(item.id);
+      } catch (e: any) {
+        failures.push(`${item.name}：${e.message}`);
+      }
+    }
+    selectedReviewIds.value = selectedReviewIds.value.filter((id) => !completed.includes(id));
+    try {
+      await props.reload();
+    } catch {
+      failures.push("刷新失败，请手动刷新页面查看最新状态");
+    }
+    const result = `批量审核完成：成功 ${completed.length} 项，失败 ${items.length - completed.length} 项。`;
+    batchProgress.value = result;
+    if (failures.length) batchError.value = failures.join("\n");
+    else emit("notify", result);
+  } finally {
+    busy.value = false;
+  }
+}
 </script>
 <template>
   <main class="workspace-content">
@@ -266,12 +442,15 @@ const readyForMedia = computed(
           : "项目已暂停；当前已提交的模型请求可能继续完成，后续任务等待恢复。"
       }}<button class="text-button" @click="control('resume')">恢复项目</button>
     </div>
-    <div v-if="activeJob" class="active-job-banner">
-      <Icon name="loading" class="spinning" :size="17" /><span
-        >{{ stageText[activeJob.stage] }}正在生成
-        <small>{{ activeJob.entity_id }}</small></span
-      ><span>结果会自动出现在工作台</span>
-    </div>
+    <ProjectActivity
+      :project="project"
+      :worker="worker"
+      :reload="props.reload"
+      @notify="emit('notify', $event)"
+      @settings="emit('settings')"
+      @jobs="emit('jobs')"
+      @review="stage = $event === 'audio' ? 'video' : $event"
+    />
     <div class="pipeline-steps">
       <button
         v-for="(s, i) in project.progress"
@@ -609,10 +788,37 @@ const readyForMedia = computed(
             {{ ep.title }}
           </option></select
         ><span class="muted small"
-          >{{ entities.length }} 项 · 生成后逐项审核</span
+          >已有结果 {{ mediaSummary.available }} / {{ entities.length }} ·
+          待审核 {{ mediaSummary.pending }} · 已批准
+          {{ mediaSummary.approved }}</span
         >
       </div>
-      <div v-if="!readyForMedia" class="stage-empty">
+      <div v-if="canBatchReview" class="batch-review" role="region" aria-label="批量审核">
+        <div class="batch-review-controls">
+          <button
+            class="btn secondary"
+            :disabled="busy || !reviewCandidates.length"
+            @click="selectedReviewIds = reviewCandidates.map((item) => item.id)"
+          >全选待审核</button>
+          <button class="btn secondary" :disabled="busy || !selectedReviews.length" @click="selectedReviewIds = []">
+            取消选择
+          </button>
+          <span class="muted small">已选择 {{ selectedReviews.length }} / {{ reviewCandidates.length }} 项待审核</span>
+          <button class="btn primary" :disabled="busy || !selectedReviews.length" @click="reviewSelected(true)">
+            批量批准
+          </button>
+          <button class="btn secondary" :disabled="busy || !selectedReviews.length" @click="reviewSelected(false)">
+            批量标记返工
+          </button>
+        </div>
+        <label class="batch-review-note small">审核备注（可选）
+          <input v-model="batchNote" :disabled="busy" maxlength="2000" placeholder="将应用于本次选中的素材" />
+        </label>
+        <p class="muted small">仅审核当前页面选中的待审核素材；每项仍会校验当前版本与审核状态。</p>
+        <p v-if="batchProgress" class="small" role="status">{{ batchProgress }}</p>
+        <p v-if="batchError" class="inline-error batch-review-error" role="alert">{{ batchError }}</p>
+      </div>
+      <div v-if="!canBrowseMedia" class="stage-empty">
         <Icon name="layers" :size="34" />
         <h3>先确认创作蓝图。</h3>
         <p>请批准制作规范和分集分镜，再开始生成。</p>
@@ -620,131 +826,171 @@ const readyForMedia = computed(
           前往分集分镜
         </button>
       </div>
-      <div
-        v-else
-        class="media-grid"
-        :class="{ renders: activeKind === 'render' }"
-      >
-        <article v-for="entity in entities" :key="entity.id" class="media-card">
-          <button
-            class="media-card-preview"
-            :class="{ portrait: project.aspect_ratio === '9:16' }"
-            :disabled="!artifact(activeKind, entity.id)"
-            @click="detail = artifact(activeKind, entity.id) || null"
+      <div v-else>
+        <div v-if="canShowReference && !readyForMedia" class="notice">
+          <Icon
+            name="upload"
+          />可以先导入角色、场景和道具参考图；批准规范与分镜后，才能审核参考图并生成后续画面。
+        </div>
+        <div class="media-grid" :class="{ renders: activeKind === 'render' }">
+          <article
+            v-for="entity in entities"
+            :key="entity.id"
+            class="media-card"
           >
-            <template v-if="artifact(activeKind, entity.id)"
-              ><img
-                v-if="['reference', 'keyframe'].includes(activeKind)"
-                :src="artifact(activeKind, entity.id)!.url"
-                :alt="entity.name || entity.title"
-                loading="lazy" /><video
-                v-else-if="activeKind !== 'audio'"
-                :src="artifact(activeKind, entity.id)!.url + '#t=0.1'"
-                preload="metadata"
-                muted
-                playsinline /><Icon v-else name="audio" :size="32" /><span
-                class="media-preview-overlay"
+            <button
+              class="media-card-preview"
+              :class="{ portrait: project.aspect_ratio === '9:16' }"
+              :disabled="!artifact(activeKind, entity.id)"
+              @click="detail = artifact(activeKind, entity.id) || null"
+            >
+              <template v-if="artifact(activeKind, entity.id)"
+                ><img
+                  v-if="['reference', 'keyframe'].includes(activeKind)"
+                  :src="artifact(activeKind, entity.id)!.url"
+                  :alt="entity.name || entity.title"
+                  loading="lazy" /><video
+                  v-else-if="activeKind !== 'audio'"
+                  :src="artifact(activeKind, entity.id)!.url + '#t=0.1'"
+                  preload="metadata"
+                  muted
+                  playsinline /><Icon v-else name="audio" :size="32" /><span
+                  class="media-preview-overlay"
+                  ><Icon
+                    :name="
+                      activeKind === 'video' || activeKind === 'render'
+                        ? 'play'
+                        : 'eye'
+                    "
+                    :size="26" /></span></template
+              ><template v-else
                 ><Icon
                   :name="
-                    activeKind === 'video' || activeKind === 'render'
-                      ? 'play'
-                      : 'eye'
+                    ['running', 'queued'].includes(
+                      jobState(activeKind, entity.id)?.status || '',
+                    )
+                      ? 'loading'
+                      : activeKind === 'video' || activeKind === 'render'
+                        ? 'clapper'
+                        : 'images'
                   "
-                  :size="26" /></span></template
-            ><template v-else
-              ><Icon
-                :name="
-                  ['running', 'queued'].includes(
-                    jobState(activeKind, entity.id)?.status || '',
-                  )
-                    ? 'loading'
-                    : activeKind === 'video' || activeKind === 'render'
-                      ? 'clapper'
-                      : 'images'
-                "
-                :size="30"
-                :class="{
-                  spinning:
-                    jobState(activeKind, entity.id)?.status === 'running',
-                }"
-              /><span>{{
-                statusText[jobState(activeKind, entity.id)?.status || ""] ||
-                "等待生成"
-              }}</span></template
-            ><span
-              v-if="artifact(activeKind, entity.id)"
-              :class="[
-                'media-review badge',
-                artifact(activeKind, entity.id)!.review,
-              ]"
-              >{{ statusText[artifact(activeKind, entity.id)!.review] }}</span
-            >
-          </button>
-          <div class="media-card-info">
-            <h3>{{ entity.name || entity.title }}</h3>
-            <p>{{ entity.description || entity.synopsis }}</p>
-            <div
-              v-if="jobState(activeKind, entity.id)?.error"
-              class="card-error"
-            >
-              {{ jobState(activeKind, entity.id)?.error?.message }}
-            </div>
-            <div class="media-card-actions">
-              <span class="muted small">{{
-                entity.duration
-                  ? entity.duration + " 秒"
-                  : entity.kind || entity.id
-              }}</span
-              ><button
+                  :size="30"
+                  :class="{
+                    spinning:
+                      jobState(activeKind, entity.id)?.status === 'running',
+                  }"
+                /><span>{{
+                  statusText[jobState(activeKind, entity.id)?.status || ""] ||
+                  "等待生成"
+                }}</span></template
+              ><span
                 v-if="artifact(activeKind, entity.id)"
-                class="text-button"
-                @click="detail = artifact(activeKind, entity.id)!"
+                :class="[
+                  'media-review badge',
+                  artifact(activeKind, entity.id)!.review,
+                ]"
+                >{{ statusText[artifact(activeKind, entity.id)!.review] }}</span
               >
-                审核 <Icon name="right" :size="14" /></button
-              ><button
-                class="text-button"
-                :disabled="
-                  busy ||
-                  ['queued', 'running'].includes(
-                    jobState(activeKind, entity.id)?.status || '',
-                  )
-                "
-                @click="generate(activeKind, entity.id, true)"
+            </button>
+            <div class="media-card-info">
+              <label
+                v-if="canBatchReview && artifact(activeKind, entity.id)?.review === 'pending' && !artifact(activeKind, entity.id)?.archived"
+                class="batch-review-select small"
               >
-                <Icon name="refresh" :size="13" />{{
-                  artifact(activeKind, entity.id) ? "重新生成" : "生成"
+                <input v-model="selectedReviewIds" type="checkbox" :value="artifact(activeKind, entity.id)!.id" :disabled="busy" />
+                选择审核 {{ entity.name || entity.title || entity.id }}
+              </label>
+              <h3>{{ entity.name || entity.title }}</h3>
+              <ArtifactSource
+                v-if="artifact(activeKind, entity.id)"
+                :artifact="artifact(activeKind, entity.id)!"
+              />
+              <p>{{ entity.description || entity.synopsis }}</p>
+              <div
+                v-if="jobState(activeKind, entity.id)?.error"
+                class="card-error"
+              >
+                {{ jobErrorMessage(jobState(activeKind, entity.id)) }}
+              </div>
+              <div
+                v-if="activeKind === 'reference' && hasOlderReferenceSource(entity.id)"
+                class="muted small"
+              >
+                {{
+                  !referenceSource(entity.id)
+                    ? "上传原图属于旧版本，请重新导入并批准"
+                    : referenceSource(entity.id)?.review === "approved"
+                      ? "重新生成将使用已批准的上传原图"
+                      : "请先审核上传原图，才能以原图生成"
                 }}
+              </div>
+              <div class="media-card-actions">
+                <span class="muted small">{{
+                  entity.duration
+                    ? entity.duration + " 秒"
+                    : entity.kind || entity.id
+                }}</span
+                ><button
+                  v-if="artifact(activeKind, entity.id)"
+                  class="text-button"
+                  @click="detail = artifact(activeKind, entity.id)!"
+                >
+                  {{ readyForMedia ? "审核" : "预览" }}
+                  <Icon name="right" :size="14" /></button
+                ><button
+                  class="text-button"
+                  :disabled="
+                    busy ||
+                    !readyForMedia ||
+                    ['queued', 'running'].includes(
+                      jobState(activeKind, entity.id)?.status || '',
+                    )
+                  "
+                  @click="generate(activeKind, entity.id, true)"
+                >
+                  <Icon name="refresh" :size="13" />{{
+                    activeKind === "reference" && referenceSource(entity.id)
+                      ? "基于原图生成"
+                      : artifact(activeKind, entity.id)
+                        ? "重新生成"
+                        : "生成"
+                  }}
+                </button>
+              </div>
+              <button v-if="activeKind === 'keyframe'" class="text-button" :disabled="!readyForMedia" @click="openReferences(entity)">
+                <Icon name="link" :size="13" />配置多角度参考与前镜
+              </button>
+              <button
+                v-if="activeKind !== 'render'"
+                class="text-button audio-generate"
+                :disabled="busy || project.paused || project.cancelled"
+                @click="chooseUpload(entity.id)"
+              >
+                <Icon name="upload" :size="13" />上传已有素材</button
+              ><button
+                v-if="
+                  activeKind === 'video' &&
+                  (entity.narration || entity.dialogue)
+                "
+                class="audio-generate text-button"
+                :disabled="busy"
+                @click="generate('audio', entity.id, true)"
+              >
+                <Icon name="audio" :size="13" />{{
+                  artifact("audio", entity.id)
+                    ? "查看 / 重新配音"
+                    : "生成独立配音"
+                }}</button
+              ><button
+                v-if="artifact('audio', entity.id) && activeKind === 'video'"
+                class="text-button"
+                @click="detail = artifact('audio', entity.id)!"
+              >
+                审核配音
               </button>
             </div>
-            <button
-              v-if="activeKind !== 'render'"
-              class="text-button audio-generate"
-              :disabled="busy"
-              @click="chooseUpload(entity.id)"
-            >
-              <Icon name="upload" :size="13" />上传已有素材</button
-            ><button
-              v-if="
-                activeKind === 'video' && (entity.narration || entity.dialogue)
-              "
-              class="audio-generate text-button"
-              :disabled="busy"
-              @click="generate('audio', entity.id, true)"
-            >
-              <Icon name="audio" :size="13" />{{
-                artifact("audio", entity.id)
-                  ? "查看 / 重新配音"
-                  : "生成独立配音"
-              }}</button
-            ><button
-              v-if="artifact('audio', entity.id) && activeKind === 'video'"
-              class="text-button"
-              @click="detail = artifact('audio', entity.id)!"
-            >
-              审核配音
-            </button>
-          </div>
-        </article>
+          </article>
+        </div>
       </div>
     </section>
     <input
@@ -762,10 +1008,30 @@ const readyForMedia = computed(
     /><MediaDetail
       v-if="detail"
       :artifact="detail"
+      :review-allowed="readyForMedia"
       @close="detail = null"
       @refresh="props.reload"
       @notify="emit('notify', $event)"
     />
+    <div v-if="referenceShot" class="modal-backdrop" @click.self="referenceShot = null">
+      <section class="modal edit-modal wide-modal" role="dialog" aria-modal="true" aria-label="配置镜头参考">
+        <button class="icon-btn modal-close" aria-label="关闭" @click="referenceShot = null"><Icon name="close" /></button>
+        <h2>配置 {{ referenceShot.title }} 的参考图</h2>
+        <p class="muted small">已绑定素材的当前批准图自动加入。可额外选择已批准的同素材正面、侧面、服装、场景或道具细节；请逐张上传并批准。修改绑定会使相关关键帧及下游结果失效。</p>
+        <div class="asset-checkboxes">
+          <label v-for="item in eligibleReferences" :key="item.id">
+            <input v-model="extraReferences" type="checkbox" :value="item.id" />
+            <img :src="item.url" alt="参考图" style="width:72px;height:72px;object-fit:cover" />
+            {{ project.plan.assets.find((asset: any) => asset.id === item.entity_id)?.name || item.entity_id }} · {{ item.id }}
+          </label>
+        </div>
+        <p v-if="!eligibleReferences.length" class="muted">尚无已批准的绑定素材参考图。</p>
+        <label class="field">已批准的前镜连续性参考<select v-model="previousShot"><option value="">不使用前镜</option><option v-for="shot in previousShots" :key="shot.id" :value="shot.id">{{ shot.title }} · {{ shot.id }}</option></select></label>
+        <p class="muted small">网页渠道通常最多 10 张图；视觉质检还需额外上传候选图，超过渠道上限会暂停而不会遗漏参考。</p>
+        <div v-if="error" class="inline-error">{{ error }}</div>
+        <button class="btn primary" :disabled="busy" @click="saveReferences">保存参考绑定</button>
+      </section>
+    </div>
     <div v-if="editShot" class="modal-backdrop" @click.self="editShot = null">
       <section
         class="modal edit-modal"

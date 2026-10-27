@@ -70,6 +70,7 @@ export interface Artifact {
   mime: string;
   contract_revision: number;
   plan_revision: number;
+  dependencies?: string[];
   created_at: number;
   route: any;
   metadata: any;
@@ -96,15 +97,45 @@ export interface Job {
   entity_id: string;
   status: string;
   created_at: number;
+  updated_at?: number;
   error?: { code: string; message: string };
   attempt: number;
-  events?: any[];
+  verification_required?: boolean;
+  events?: { created: number; message: string }[];
+  latest_event?: { created: number; message: string } | null;
   snapshot?: any;
   runtime?: any;
   effective_prompt?: string;
 }
+export function jobErrorMessage(job?: Job) {
+  const error = job?.error;
+  if (!error) return "";
+  if (error.code === "authentication_failed")
+    return "网页账号认证失败，请在连接设置中更新登录信息并重新连接。";
+  if (error.code === "accounts_unavailable")
+    return "没有可用的 Gemini 账号，请在连接设置中更新失效账号或启用其他账号。";
+  return error.message;
+}
+export function requiresVerification(job?: Job) {
+  return Boolean(
+    job &&
+    (job.verification_required ||
+      job.runtime?.cloud_submitting ||
+      [
+        "REMOTE_RESULT_UNCERTAIN",
+        "upstream_timeout",
+        "upstream_error",
+        "service_stopped",
+        "download_failed",
+        "video_download_failed",
+      ].includes(job.error?.code || "") ||
+      (job.error?.code === "SUBMISSION_UNKNOWN" && !job.runtime?.remote_id)),
+  );
+}
 export interface Project {
   id: string;
+  version: number;
+  shot_reference_bindings?: Record<string, { artifact_ids: string[]; previous_shot_id: string | null }>;
   title: string;
   mode: string;
   brief: string;
@@ -126,6 +157,12 @@ export interface Project {
   plan_approved: boolean;
   plan_contract_hash?: string;
   automation: boolean;
+  automation_status?: {
+    state: string;
+    stage?: string;
+    job_ids?: string[];
+    error?: { code: string; message: string };
+  };
   paused: boolean;
   cancelled: boolean;
   artifacts: Artifact[];

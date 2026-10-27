@@ -3,6 +3,15 @@ import { computed, onMounted, ref } from "vue";
 import Icon from "./Icon.vue";
 import CloudStoragePanel from "./CloudStoragePanel.vue";
 import { api } from "./api";
+
+type GeminiAccount = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  state: string;
+  error?: { code?: string } | null;
+};
+
 const emit = defineEmits<{ notify: [message: string] }>();
 const settings = ref<any>(null),
   catalog = ref<any>({ accounts: [], image: [], video: [] }),
@@ -12,10 +21,13 @@ const settings = ref<any>(null),
   connection = ref<any>(null),
   credential = ref(""),
   psidts = ref(""),
-  accountName = ref("Gemini 账号"),
+  accountName = ref(""),
+  editingAccount = ref<GeminiAccount | null>(null),
   credits = ref<any>(null),
   upstreams = ref<any>({}),
   health = ref<any>({});
+const seedream = ref<any>(null), seedreamKey = ref(""), seedreamError = ref("");
+const savedAllowPaid = ref(false);
 const kinds = [
   {
     id: "text",
@@ -30,19 +42,29 @@ const kinds = [
     description: "角色 / 场景参考图与逐镜关键帧",
   },
   {
+    id: "vision",
+    name: "图片自动质检",
+    icon: "images",
+    description: "检查生成图与参考图、制作规范；模型必须支持视觉输入",
+  },
+  {
     id: "video",
     name: "视频生成",
     icon: "clapper",
     description: "从已批准关键帧生成动态镜头",
   },
 ];
+const geminiAccounts = computed<GeminiAccount[]>(
+  () => catalog.value.accounts || [],
+);
+const enabledGeminiAccounts = computed(
+  () => geminiAccounts.value.filter((account) => account.enabled).length,
+);
 const webProviders = computed(() => [
   {
     id: "gemini",
     name: "Gemini 网页",
-    configured: catalog.value.accounts.some(
-      (a: any) => a.configured || a.status === "ready",
-    ),
+    configured: enabledGeminiAccounts.value > 0,
     kind: "account",
     credential_label: "__Secure-1PSID Cookie Value",
     text: true,
@@ -76,11 +98,46 @@ async function load() {
       api("/health"),
     ]);
     settings.value = s;
+    savedAllowPaid.value = s.allow_paid;
     catalog.value = c;
     upstreams.value = u;
     health.value = h;
+    try {
+      seedream.value = await api("/gateway/seedream");
+      seedreamError.value = "";
+    } catch {
+      seedream.value = null;
+      seedreamError.value = "无法读取 Seedream 状态，请检查网关。";
+    }
   } catch (e: any) {
     error.value = e.message;
+  }
+}
+async function saveSeedream() {
+  busy.value = true;
+  seedreamError.value = "";
+  try {
+    seedream.value = await api("/gateway/seedream", "PUT", { api_key: seedreamKey.value });
+    seedreamKey.value = "";
+    emit("notify", "Seedream 凭据已保存到 Web2API，不会回显。");
+  } catch (e: any) {
+    seedreamError.value = e.message;
+  } finally {
+    busy.value = false;
+  }
+}
+async function clearSeedream() {
+  if (!window.confirm("清除 Web2API 中的 Seedream 凭据？这也会关闭网关的 Seedream 兜底。")) return;
+  busy.value = true;
+  seedreamError.value = "";
+  try {
+    seedream.value = await api("/gateway/seedream", "DELETE");
+    seedreamKey.value = "";
+    emit("notify", "Web2API Seedream 凭据已清除。");
+  } catch (e: any) {
+    seedreamError.value = e.message;
+  } finally {
+    busy.value = false;
   }
 }
 async function save() {
@@ -88,13 +145,14 @@ async function save() {
   error.value = "";
   try {
     const data = JSON.parse(JSON.stringify(settings.value));
-    for (const kind of ["text", "image", "video", "audio"]) {
+    for (const kind of ["text", "image", "vision", "video", "audio"]) {
       for (const route of kind === "audio" ? [data[kind]] : data[kind]) {
         delete route.configured;
         if (route.api_key === "") delete route.api_key;
       }
     }
     settings.value = await api("/settings", "PUT", data);
+    savedAllowPaid.value = settings.value.allow_paid;
     emit("notify", "模型策略已保存。密钥保留在本机，不会回显。");
   } catch (e: any) {
     error.value = e.message;
@@ -104,7 +162,7 @@ async function save() {
 }
 function add(kind: string) {
   settings.value[kind].push({
-    transport: kind === "text" ? "cloud" : "gateway",
+    transport: kind === "text" || kind === "vision" ? "cloud" : "gateway",
     provider:
       kind === "video" ? "vidu" : kind === "image" ? "gemini" : "compatible",
     model: "default",
@@ -121,8 +179,49 @@ function routeProvider(kind: string, r: any) {
   r.model =
     (kind === "image" ? p?.image_default_model : p?.default_model) || "default";
 }
-function connect(p: any) {
+function accountState(account: GeminiAccount) {
+  if (!account.enabled) return "已停用";
+  const states: Record<string, string> = {
+    configured: "已保存，待检查",
+    ready: "已连接",
+    busy: "使用中",
+    connecting: "检查中",
+    login_required: "登录失效",
+    cooldown: "暂时受限",
+  };
+  return states[account.state] || "待检查";
+}
+function accountIssue(account: GeminiAccount) {
+  if (!account.enabled || !account.error?.code) return "";
+  const messages: Record<string, string> = {
+    authentication_failed: "登录已失效，请更新此账号的 Cookie。",
+    quota_exceeded: "上次请求额度不足，网关会尝试其他已启用账号。",
+    temporarily_blocked: "平台暂时限制了请求，请稍后检查。",
+    upstream_timeout: "上次请求可能已完成，请先核对网页记录。",
+  };
+  return messages[account.error.code] || "上次请求未成功，请检查账号或网络。";
+}
+function accountBusy(account: GeminiAccount) {
+  return busy.value || ["busy", "connecting"].includes(account.state);
+}
+function nextAccountName() {
+  const names = new Set(geminiAccounts.value.map((account) => account.name));
+  let index = 1;
+  while (names.has(`Gemini 账号 ${index}`)) index++;
+  return `Gemini 账号 ${index}`;
+}
+function connect(p: any, account: GeminiAccount | null = null) {
   connection.value = p;
+  editingAccount.value = account;
+  accountName.value = account?.name || nextAccountName();
+  credential.value = "";
+  psidts.value = "";
+  credits.value = null;
+  error.value = "";
+}
+function closeConnection() {
+  connection.value = null;
+  editingAccount.value = null;
   credential.value = "";
   psidts.value = "";
   credits.value = null;
@@ -133,26 +232,35 @@ async function saveConnection() {
   error.value = "";
   try {
     const p = connection.value;
+    const account = editingAccount.value;
     const path =
       p.kind === "account"
-        ? "/accounts"
+        ? "/accounts" + (account ? "/" + encodeURIComponent(account.id) : "")
         : p.kind === "image"
           ? "/web-image-providers/" + p.id
           : "/video-providers/" + p.id;
     const body =
       p.kind === "account"
         ? {
-            name: accountName.value,
+            name: accountName.value.trim(),
             secure_1psid: credential.value,
             secure_1psidts: psidts.value,
+            ...(account ? { enabled: account.enabled } : {}),
           }
         : { credential: credential.value };
-    await api("/gateway" + path, p.kind === "account" ? "POST" : "PUT", body);
-    connection.value = null;
-    credential.value = "";
-    psidts.value = "";
+    await api(
+      "/gateway" + path,
+      p.kind === "account" && !account ? "POST" : "PUT",
+      body,
+    );
+    closeConnection();
     await load();
-    emit("notify", "账号凭据已保存。请查询额度或连接状态后开始生成。");
+    emit(
+      "notify",
+      p.kind === "account"
+        ? "Gemini 账号已保存，请单独检查连接。"
+        : "账号凭据已保存。请查询额度或连接状态后开始生成。",
+    );
   } catch (e: any) {
     error.value = e.message;
   } finally {
@@ -163,35 +271,50 @@ async function checkCredits(p: any) {
   busy.value = true;
   error.value = "";
   try {
-    if (p.kind === "account") {
-      await api("/gateway/connect", "POST");
-      emit("notify", "Gemini 连接检查已完成");
-      await load();
-    } else {
-      credits.value = await api(
-        "/gateway/" +
-          (p.kind === "image" ? "web-image-providers" : "video-providers") +
-          "/" +
-          p.id +
-          "/credits",
-      );
-    }
+    credits.value = await api(
+      "/gateway/" +
+        (p.kind === "image" ? "web-image-providers" : "video-providers") +
+        "/" +
+        p.id +
+        "/credits",
+    );
   } catch (e: any) {
     error.value = e.message;
   } finally {
     busy.value = false;
   }
 }
-async function removeAccount(a: any) {
+async function checkAccount(account: GeminiAccount) {
+  busy.value = true;
+  error.value = "";
   try {
-    await api("/gateway/accounts/" + a.id, "PUT", {
-      name: a.name,
-      enabled: false,
+    const path = "/gateway/accounts/" + encodeURIComponent(account.id);
+    await api(path + "/connect", "POST");
+    if (account.state === "login_required") await api(path + "/retry", "POST");
+    await load();
+    emit("notify", `「${account.name}」连接检查通过`);
+  } catch (e: any) {
+    await load();
+    error.value = `「${account.name}」连接检查失败：${e.message}`;
+  } finally {
+    busy.value = false;
+  }
+}
+async function toggleAccount(account: GeminiAccount) {
+  busy.value = true;
+  error.value = "";
+  try {
+    const enabled = !account.enabled;
+    await api("/gateway/accounts/" + encodeURIComponent(account.id), "PUT", {
+      name: account.name,
+      enabled,
     });
     await load();
-    emit("notify", "账号已停用");
+    emit("notify", `「${account.name}」已${enabled ? "启用" : "停用"}`);
   } catch (e: any) {
     error.value = e.message;
+  } finally {
+    busy.value = false;
   }
 }
 onMounted(load);
@@ -253,6 +376,10 @@ onMounted(load);
             aria-label="允许付费渠道" /><i
         /></label>
       </section>
+      <div v-if="seedream?.configured && !savedAllowPaid" class="notice warning">
+        Web2API 已配置 Seedream 付费兜底，但工作台付费开关未开启；为防止意外付费，Gemini 图片请求会被阻止。
+        请启用并保存付费策略，或在账号与连接中清除 Seedream 凭据。
+      </div>
       <section v-for="kind in kinds" :key="kind.id" class="settings-card">
         <div class="settings-card-heading">
           <span class="settings-kind-icon"
@@ -381,6 +508,10 @@ onMounted(load);
         </div>
       </section>
       <section class="settings-card">
+        <div class="settings-card-heading"><div><h2>自动质检重试</h2><p>图片不合格时按问题改词重试；视觉质检失败或不可用时暂停，不进入人工审核。每次生成和质检可能产生费用。</p></div></div>
+        <label class="field">每张图最多生成次数（1–5）<input type="number" min="1" max="5" v-model.number="settings.image_qc_attempts" /></label>
+      </section>
+      <section class="settings-card">
         <div class="settings-card-heading">
           <span class="settings-kind-icon"
             ><Icon name="audio" :size="23"
@@ -459,70 +590,169 @@ onMounted(load);
           <Icon name="refresh" :size="16" />刷新状态
         </button>
       </div>
+      <section class="settings-card" aria-label="Seedream 付费兜底">
+        <div class="settings-card-heading">
+          <span class="settings-kind-icon"><Icon name="images" :size="23" /></span>
+          <div>
+            <h2>Seedream 付费兜底</h2>
+            <p>直接同步 Web2API 设置；不是工作台独立保存的一份配置。</p>
+          </div>
+          <span :class="['badge', seedream?.configured ? 'approved' : 'neutral']">
+            {{ !seedream ? '状态未知' : seedream.configured ? '已配置' : '未配置' }}
+          </span>
+        </div>
+        <p class="muted small">
+          至少两个启用的 Gemini 账号本次均确认额度耗尽，或所有启用账号（至少两个）均登录失效时，
+          工作台可使用 Seedream。超时、状态不明或其他账号不可用不会触发登录失效兜底；
+          请先开启并保存“允许付费渠道”。
+        </p>
+        <p v-if="seedream" class="muted small">
+          模型：{{ seedream.model }} · 网关参考价：¥{{ seedream.output_price_cny }}/张；实际以供应商账单为准。
+          已配置不代表密钥已验证或账户有额度。
+        </p>
+        <label class="field">火山方舟 API Key
+          <input v-model="seedreamKey" type="password" autocomplete="new-password" placeholder="输入新密钥；已保存密钥不会回显" />
+        </label>
+        <div v-if="seedreamError" class="inline-error" role="alert">{{ seedreamError }}</div>
+        <div class="button-row">
+          <button class="btn primary" :disabled="busy || !seedreamKey.trim()" @click="saveSeedream">保存 Seedream 密钥</button>
+          <button v-if="seedream?.configured" class="btn secondary" :disabled="busy" @click="clearSeedream">清除 Seedream 密钥</button>
+        </div>
+      </section>
       <div class="connections-grid">
         <article
           v-for="p in webProviders"
           :key="p.id + p.kind"
           class="connection-card"
+          :class="{ 'gemini-card': p.kind === 'account' }"
         >
-          <div class="connection-card-top">
-            <span class="connection-symbol">{{
-              (p.name || p.id).slice(0, 1)
-            }}</span
-            ><span :class="['badge', p.configured ? 'approved' : 'neutral']">{{
-              p.configured ? "已配置" : "待配置"
+          <div class="connection-info">
+            <div class="connection-card-top">
+              <span class="connection-symbol">{{
+                (p.name || p.id).slice(0, 1)
+              }}</span
+              ><span
+                :class="['badge', p.configured ? 'approved' : 'neutral']"
+                >{{
+                  p.kind === "account" && geminiAccounts.length
+                    ? `${geminiAccounts.length} 个账号`
+                    : p.configured
+                      ? "已配置"
+                      : "待配置"
+                }}</span
+              >
+            </div>
+            <h3>{{ p.name || p.id }}</h3>
+            <p>
+              {{
+                p.capabilities ||
+                p.verification_label ||
+                (p.id === "gemini"
+                  ? "网页文字规划、参考图与关键帧"
+                  : "网页图像连接器")
+              }}
+            </p>
+            <span class="connection-type">{{
+              p.kind === "account"
+                ? "Gemini 网页 · 支持多个账号"
+                : p.kind === "video" && !p.free_web && p.auth_type === "api_key"
+                  ? "官方 API · 付费 / 平台额度"
+                  : "网页账号 · 额度依平台为准"
             }}</span>
+            <div class="connection-actions">
+              <button
+                class="btn secondary small-btn"
+                :disabled="busy"
+                @click="connect(p)"
+              >
+                {{
+                  p.kind === "account"
+                    ? "添加账号"
+                    : p.configured
+                      ? "更新凭据"
+                      : "配置连接"
+                }}<Icon name="right" :size="14" /></button
+              ><button
+                v-if="p.kind !== 'account' && p.supports_credits"
+                class="text-button"
+                :disabled="busy"
+                @click="
+                  connect(p);
+                  checkCredits(p);
+                "
+              >
+                查询额度
+              </button>
+            </div>
           </div>
-          <h3>{{ p.name || p.id }}</h3>
-          <p>
-            {{
-              p.capabilities ||
-              p.verification_label ||
-              (p.id === "gemini"
-                ? "网页文字规划、参考图与关键帧"
-                : "网页图像连接器")
-            }}
-          </p>
-          <span class="connection-type">{{
-            p.kind === "video" && !p.free_web && p.auth_type === "api_key"
-              ? "官方 API · 付费 / 平台额度"
-              : "网页账号 · 额度依平台为准"
-          }}</span>
-          <div class="connection-actions">
-            <button class="btn secondary small-btn" @click="connect(p)">
-              {{ p.configured ? "更新凭据" : "配置连接"
-              }}<Icon name="right" :size="14" /></button
-            ><button
-              v-if="p.supports_credits || p.kind === 'account'"
-              class="text-button"
-              :disabled="busy"
-              @click="
-                connect(p);
-                checkCredits(p);
-              "
+          <div v-if="p.kind === 'account'" class="account-list">
+            <div class="account-list-heading">
+              <strong>已保存账号</strong>
+              <span>{{ enabledGeminiAccounts }} 个已启用</span>
+            </div>
+            <div v-if="!geminiAccounts.length" class="account-hint">
+              可以分别添加多个 Gemini 网页账号。
+            </div>
+            <div
+              v-for="account in geminiAccounts"
+              :key="account.id"
+              class="account-row"
             >
-              {{ p.kind === "account" ? "检查连接" : "查询额度" }}
-            </button>
+              <div class="account-summary">
+                <b>{{ account.name }}</b>
+                <span
+                  :class="[
+                    'badge',
+                    account.enabled && account.state === 'ready'
+                      ? 'approved'
+                      : account.enabled && account.state === 'login_required'
+                        ? 'failed'
+                        : 'neutral',
+                  ]"
+                  >{{ accountState(account) }}</span
+                >
+              </div>
+              <div v-if="accountIssue(account)" class="account-issue">
+                {{ accountIssue(account) }}
+              </div>
+              <div class="account-actions">
+                <button
+                  class="text-button"
+                  :aria-label="`检查 ${account.name} 连接`"
+                  :disabled="accountBusy(account) || !account.enabled"
+                  @click="checkAccount(account)"
+                >
+                  检查连接
+                </button>
+                <button
+                  class="text-button"
+                  :aria-label="`编辑 ${account.name}`"
+                  :disabled="accountBusy(account)"
+                  @click="connect(p, account)"
+                >
+                  编辑
+                </button>
+                <button
+                  class="text-button"
+                  :aria-label="`${account.enabled ? '停用' : '启用'} ${account.name}`"
+                  :disabled="accountBusy(account)"
+                  @click="toggleAccount(account)"
+                >
+                  {{ account.enabled ? "停用" : "启用" }}
+                </button>
+              </div>
+            </div>
+            <div class="account-hint">
+              当前网关最多保存 8
+              个账号，停用不会删除；按添加顺序优先尝试已启用账号。部分超时也可能切换账号，可能产生重复请求。
+            </div>
           </div>
         </article>
       </div>
-      <div v-if="catalog.accounts.length" class="settings-card account-list">
-        <h3>Gemini 账号池</h3>
-        <div v-for="a in catalog.accounts" :key="a.id" class="account-row">
-          <b>{{ a.name }}</b
-          ><span class="badge neutral">{{ a.status || "待连接" }}</span
-          ><button
-            class="text-button"
-            :disabled="busy"
-            @click="removeAccount(a)"
-          >
-            停用
-          </button>
-        </div>
-      </div>
       <div class="notice">
         <Icon name="external" /><span
-          >上游新增的连接器会自动出现在这里。浏览器扩展、自定义网页平台、复杂账号配置，可在
+          >Gemini
+          支持多个账号，其他连接器目前各保存一套凭据。上游新增的连接器会自动出现在这里。浏览器扩展、自定义网页平台、复杂账号配置，可在
           <a
             :href="health.gateway_console_url"
             :aria-disabled="!health.gateway_console_url"
@@ -577,7 +807,7 @@ onMounted(load);
     <div
       v-if="connection"
       class="modal-backdrop"
-      @click.self="!busy && (connection = null)"
+      @click.self="!busy && closeConnection()"
     >
       <section
         class="modal connection-modal"
@@ -589,17 +819,27 @@ onMounted(load);
           class="icon-btn modal-close"
           aria-label="关闭连接设置"
           :disabled="busy"
-          @click="connection = null"
+          @click="closeConnection"
         >
           <Icon name="close" />
         </button>
         <div class="eyebrow">CONNECT YOUR MODEL</div>
-        <h2>{{ connection.name || connection.id }}</h2>
+        <h2>
+          {{
+            connection.kind === "account"
+              ? editingAccount
+                ? "编辑 Gemini 账号"
+                : "添加 Gemini 账号"
+              : connection.name || connection.id
+          }}
+        </h2>
         <p class="muted">
           {{
-            connection.api_free_note ||
-            connection.credential_label ||
-            "填写你自己账号的凭据。密钥只保存在本机私有目录。"
+            connection.kind === "account"
+              ? "分别填写每个网页账号的 Cookie；凭据只保存在本机，不会回显。"
+              : connection.api_free_note ||
+                connection.credential_label ||
+                "填写你自己账号的凭据。密钥只保存在本机私有目录。"
           }}
         </p>
         <label v-if="connection.kind === 'account'" class="field"
@@ -611,7 +851,11 @@ onMounted(load);
             class="credential-input"
             rows="4"
             autocomplete="new-password"
-            placeholder="粘贴凭据；不会回显已保存内容"
+            :placeholder="
+              editingAccount
+                ? '留空保留已保存的凭据'
+                : '粘贴凭据；不会回显已保存内容'
+            "
           /></label
         ><label v-if="connection.kind === 'account'" class="field"
           >__Secure-1PSIDTS（可选）<input
@@ -619,6 +863,10 @@ onMounted(load);
             type="password"
             autocomplete="new-password"
         /></label>
+        <p v-if="editingAccount" class="muted small">
+          仅修改名称时可留空凭据；更换主 Cookie 时，请重新填写对应的
+          __Secure-1PSIDTS（如有）。
+        </p>
         <div v-if="credits" class="credits-result">
           <b>平台返回的额度信息</b>
           <pre>{{ JSON.stringify(credits, null, 2) }}</pre>
@@ -627,12 +875,17 @@ onMounted(load);
         <div class="button-row">
           <button
             class="btn primary"
-            :disabled="busy || !credential.trim()"
+            :disabled="
+              busy ||
+              (connection.kind === 'account' && !accountName.trim()) ||
+              (!credential.trim() &&
+                !(connection.kind === 'account' && editingAccount))
+            "
             @click="saveConnection"
           >
             保存连接</button
           ><button
-            v-if="connection.supports_credits || connection.kind === 'account'"
+            v-if="connection.kind !== 'account' && connection.supports_credits"
             class="btn secondary"
             :disabled="busy"
             @click="checkCredits(connection)"

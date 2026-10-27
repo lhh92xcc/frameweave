@@ -41,6 +41,7 @@ test("archive library filters, paginates and preserves historical review", async
   );
   await page.goto("/#assets/archive-demo");
   await expect(page.locator(".media-card")).toHaveCount(32);
+  await expect(page.locator(".media-card").first()).toContainText("历史导入 · 原生成渠道未知");
   await expect(page.locator(".archive-filters")).toContainText("35 份素材");
   await page.getByRole("button", { name: "下一页", exact: true }).click();
   await expect(page.locator(".media-card")).toHaveCount(3);
@@ -50,6 +51,7 @@ test("archive library filters, paginates and preserves historical review", async
   await expect(page.locator(".media-card")).toHaveCount(1);
   await page.getByRole("button", { name: "预览 EP01-S35.png" }).click();
   const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("历史导入 · 原生成渠道未知");
   await expect(dialog).toContainText("FAIL");
   await expect(dialog).toContainText("WITHDRAWN");
   await expect(dialog.getByRole("button", { name: "批准素材" })).toHaveCount(0);

@@ -5,6 +5,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,9 +27,10 @@ from studio.models import (
     Review,
     RoutingSettings,
     RunRequest,
+    ShotReferences,
     StageRequest,
 )
-from studio.providers import ProviderFailure, Providers
+from studio.providers import ProviderFailure, Providers, gateway_result_uncertain, requires_verification
 from studio.settings import SettingsStore
 from studio.store import Conflict, Store, uid
 from studio.workflow import Workflow
@@ -167,12 +169,21 @@ def create_app(data_dir=None, start_worker=True, transport=None):
 
     @app.post("/api/projects/{project_id}/jobs", status_code=202)
     async def generate(project_id: str, body: StageRequest):
-        return workflow.enqueue(project_id, body.stage, body.entity_id, body.force)
+        return workflow.enqueue(
+            project_id, body.stage, body.entity_id, body.force, reference_source_id=body.reference_source_id
+        )
+
+    @app.put("/api/projects/{project_id}/shots/{shot_id}/references")
+    async def shot_references(project_id: str, shot_id: str, body: ShotReferences):
+        return workflow.project_view(workflow.set_shot_references(
+            project_id, shot_id, body.artifact_ids, body.previous_shot_id, body.expected_version
+        ))
 
     @app.post("/api/projects/{project_id}/automation")
     async def automation(project_id: str, body: RunRequest):
         p = store.project(project_id)
         p.update(automation=body.enabled, paused=False, cancelled=False)
+        p.pop("automation_error", None)
         store.save_project(p, p["version"])
         workflow.wake.set()
         return p
@@ -200,14 +211,27 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     async def jobs():
         result = []
         for job in store.jobs():
-            result.append(
-                {k: v for k, v in job.items() if k not in {"snapshot", "effective_prompt", "runtime"}}
-            )
+            item = {k: v for k, v in job.items() if k not in {"snapshot", "effective_prompt", "runtime"}}
+            item["verification_required"] = requires_verification(job)
+            result.append(item)
         return result
 
     @app.get("/api/jobs/{job_id}")
     async def job(job_id: str):
         return {**store.job(job_id), "events": store.events(job_id)}
+
+    @app.get("/api/jobs/{job_id}/image-attempts/{number}")
+    async def image_attempt(job_id: str, number: int):
+        runtime = store.job(job_id).get("runtime", {})
+        attempts = runtime.get("image_qc_attempts", [])
+        pending = runtime.get("pending_qc_image")
+        if number < 1 or (number > len(attempts) and not (pending and pending["attempt"] == number)):
+            raise HTTPException(404)
+        result = attempts[number - 1]["result"] if number <= len(attempts) else pending["result"]
+        path = (store.media / result["file"]).resolve()
+        if not path.is_relative_to(store.media) or not path.is_file():
+            raise HTTPException(404)
+        return FileResponse(path, media_type=result["mime"])
 
     @app.post("/api/jobs/{job_id}/cancel")
     async def cancel_job(job_id: str):
@@ -228,17 +252,87 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         j = store.job(job_id)
         if j["status"] not in {"failed", "blocked", "cancelled"}:
             raise ValueError("只能重试已停止的任务")
+        successor = next(
+            (
+                candidate
+                for candidate in store.jobs(j["project_id"])
+                if candidate.get("retry_of") == j["id"]
+                and candidate["fingerprint"] == j["fingerprint"]
+                and candidate["status"] in {"queued", "running", "succeeded"}
+            ),
+            None,
+        )
+        if successor:
+            return successor
         receipt = j["runtime"].get("receipt")
         if j["runtime"].get("cloud_submitting") and not (receipt and (store.root / receipt).is_file()):
             raise ValueError("提交结果不明：请先在供应商核对，再通过“已核对并重新生成”创建显式新请求")
-        if j["runtime"].get("remote_id") or (receipt and (store.root / receipt).is_file()):
-            p = store.project(j["project_id"])
-            workflow.assert_current(j, p, allow_cancelled_job=True)
+        if requires_verification(j) and not (receipt and (store.root / receipt).is_file()):
+            raise ValueError("提交结果不明：请先在供应商核对，再通过“已核对并重新生成”创建显式新请求")
+        if (
+            j["runtime"].get("pending_qc_image")
+            and not j["runtime"].get("remote_id")
+            and not j["runtime"].get("cloud_submitting")
+            and (j.get("error") or {}).get("code") != "IMAGE_QC_EXHAUSTED"
+        ):
+            workflow.assert_current(j, allow_cancelled_job=True)
+            j["runtime"].pop("vision_calls", None)
+            if (j.get("error") or {}).get("code") == "VISION_INVALID":
+                j["runtime"]["qc_retry_nonce"] = j["runtime"].get("qc_retry_nonce", 0) + 1
             j.update(status="queued", error=None)
             store.save_job(j)
             workflow.wake.set()
             return j
-        return workflow.enqueue(j["project_id"], j["stage"], j["entity_id"], force=True)
+        remote_id = j["runtime"].get("remote_id")
+        if remote_id or (receipt and (store.root / receipt).is_file()):
+            p = store.project(j["project_id"])
+            workflow.assert_current(j, p, allow_cancelled_job=True)
+            if remote_id:
+                remote = await providers.gateway_job_status(remote_id)
+                current = store.job(job_id)
+                if current["status"] not in {"failed", "blocked", "cancelled"}:
+                    return current
+                if current["runtime"].get("remote_id") != remote_id:
+                    raise Conflict("任务状态已变化，请刷新后重试")
+                j = current
+                workflow.assert_current(j, allow_cancelled_job=True)
+                if remote["status"] in {"failed", "cancelled"}:
+                    if gateway_result_uncertain(remote):
+                        message = "网页任务可能已在供应商侧完成，请先核对任务和账单，再单独确认是否重新生成"
+                        j["error"] = {"code": "REMOTE_RESULT_UNCERTAIN", "message": message}
+                        store.save_job(j)
+                        store.event(j["id"], message)
+                        raise ProviderFailure("REMOTE_RESULT_UNCERTAIN", message)
+                    return workflow.enqueue(
+                        j["project_id"],
+                        j["stage"],
+                        j["entity_id"],
+                        force=True,
+                        retry_of=j,
+                        reference_source_id=(
+                            j["snapshot"]["dependencies"][0]
+                            if j["stage"] == "reference" and j["snapshot"]["dependencies"]
+                            else None
+                        ),
+                    )
+            j.update(status="queued", error=None)
+            store.save_job(j)
+            workflow.wake.set()
+            return j
+        if j["stage"] == "reference" and "reference_base_id" in j["snapshot"]:
+            workflow.assert_current(j, allow_cancelled_job=True)
+        return workflow.enqueue(
+            j["project_id"],
+            j["stage"],
+            j["entity_id"],
+            force=True,
+            retry_of=j,
+            reference_source_id=(
+                j["snapshot"]["dependencies"][0]
+                if j["stage"] == "reference" and j["snapshot"]["dependencies"]
+                else None
+            ),
+        )
 
     @app.post("/api/projects/{project_id}/upload", status_code=201)
     async def upload(
@@ -247,7 +341,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         if stage not in {"reference", "keyframe", "video", "audio"}:
             raise ValueError("不支持该素材类型")
         p = store.project(project_id)
-        snapshot = workflow.snapshot(p, stage, entity_id)
+        snapshot = workflow.snapshot(p, stage, entity_id, allow_unapproved_reference=stage == "reference")
         chunks, size = [], 0
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
@@ -286,15 +380,13 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                 or current["plan_revision"] != snapshot["plan_revision"]
             ):
                 raise Conflict("项目已更新，请重新导入到当前版本")
-            job = store.enqueue(
-                project_id, stage, entity_id, {**snapshot, "import_nonce": artifact_id}, force=True
+            job = store.record_import(
+                project_id,
+                stage,
+                entity_id,
+                {**snapshot, "import_nonce": artifact_id},
+                workflow.prompt(snapshot, "用户导入已有素材，待人工确认符合规范"),
             )
-            job.update(
-                status="succeeded",
-                effective_prompt=workflow.prompt(snapshot, "用户导入已有素材，待人工确认符合规范"),
-                runtime={"imported": True},
-            )
-            store.save_job(job)
             result = workflow.save_output(
                 job,
                 artifact_id,
@@ -324,7 +416,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
 
     @app.post("/api/artifacts/{artifact_id}/review")
     async def review(artifact_id: str, body: Review):
-        return workflow.review(artifact_id, body.approved, body.note)
+        return workflow.review(artifact_id, body.approved, body.note, body.expected_review)
 
     @app.get("/api/artifacts/{artifact_id}/content")
     async def media(artifact_id: str, download: bool = False):
@@ -439,6 +531,8 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         parts = path.split("/")
         if parts[0] not in allowed or ".." in parts or len(parts) > 3:
             raise HTTPException(404)
+        if parts[0] == "seedream" and (path != "seedream" or request.method not in {"GET", "PUT", "DELETE"}):
+            raise HTTPException(404)
         raw = await request.body()
         if len(raw) > 64 * 1024:
             raise HTTPException(413)
@@ -452,6 +546,27 @@ def create_app(data_dir=None, start_worker=True, transport=None):
             )
         except httpx.HTTPError as exc:
             raise ProviderFailure("GATEWAY_OFFLINE", "网页模型网关未连接，请检查启动日志") from exc
+        if parts[0] == "seedream":
+            if response.is_error:
+                return JSONResponse(
+                    {"error": {"code": "SEEDREAM_SETTINGS_ERROR", "message": "Seedream 配置操作失败，请检查网关和输入后重试"}},
+                    status_code=response.status_code,
+                )
+            try:
+                data = response.json()
+                if (
+                    not isinstance(data, dict)
+                    or not isinstance(data.get("configured"), bool)
+                    or not isinstance(data.get("model"), str)
+                    or not re.fullmatch(r"doubao-seedream-[0-9-]+(?:flash-|lite-)?[0-9]+", data["model"])
+                    or data.get("base_url") != "https://ark.cn-beijing.volces.com/api/v3"
+                    or type(data.get("output_price_cny")) not in (int, float)
+                    or not 0 <= data["output_price_cny"] <= 10000
+                ):
+                    raise ValueError("invalid seedream settings")
+                return {key: data[key] for key in ("configured", "model", "base_url", "output_price_cny")}
+            except (ValueError, TypeError) as exc:
+                raise ProviderFailure("GATEWAY_INVALID_RESPONSE", "无法读取 Seedream 配置状态") from exc
         return Response(response.content, status_code=response.status_code, media_type="application/json")
 
     @app.get("/api/upstreams")
