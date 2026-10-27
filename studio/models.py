@@ -4,6 +4,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+REFERENCE_ROLES = {
+    "character": {"general", "front", "side", "full_body", "costume", "accessory"},
+    "location": {"general", "wide", "reverse", "spatial"},
+    "prop": {"general", "detail", "held"},
+    "product": {"general", "detail", "held"},
+}
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -81,6 +88,7 @@ class Route(StrictModel):
     base_url: str = Field(default="", max_length=2048)
     api_key: str | None = Field(default=None, max_length=8192, repr=False)
     clear_key: bool = False
+    qc_max_cost_cny: float | None = Field(default=None, gt=0, le=10000, allow_inf_nan=False)
 
     @field_validator("base_url")
     @classmethod
@@ -110,6 +118,7 @@ class RoutingSettings(StrictModel):
     )
     vision: list[Route] = Field(default_factory=lambda: [Route()], min_length=1, max_length=6)
     image_qc_attempts: int = Field(default=3, ge=1, le=5)
+    image_qc_budget_cny: float = Field(default=0, ge=0, le=100000, allow_inf_nan=False)
     video: list[Route] = Field(
         default_factory=lambda: [Route(provider="jimeng-web", model="jimeng-seedance-2.0-mini")],
         min_length=1,
@@ -132,6 +141,10 @@ class ShotReferences(StrictModel):
     artifact_ids: list[str] = Field(default_factory=list, max_length=9)
     previous_shot_id: str | None = Field(default=None, max_length=64)
     expected_version: int = Field(ge=0)
+
+
+class ReferenceRoleEdit(StrictModel):
+    role: str = Field(min_length=1, max_length=40)
 
 
 class Review(StrictModel):

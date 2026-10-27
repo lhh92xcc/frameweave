@@ -28,10 +28,13 @@
 | `GET /api/storage`、`PUT /api/storage` | COS 配置（凭据不回显）、迁移数量与本地副本统计 |
 | `POST /api/storage/test` | 小对象上传/读回与生命周期规则只读检查 |
 | `POST /api/artifacts/{id}/review` | `{approved, note}`；旧版本不可批准 |
+| `PUT /api/artifacts/{id}/reference-role` | 分类当前版本参考图，变更分类后须重新人工审核，已有下游审核失效 |
 | `GET/PUT /api/settings` | 模型渠道、付费开关、声音与字幕 |
 | `GET /api/gateway/catalog` | 上游当前连接器目录 |
 | `/api/gateway/accounts`、`web-image-providers`、`video-providers` | 受限制的本机账号管理转发 |
 | `GET /api/upstreams` | 上游固定版本 |
+
+参考素材上传可传 `reference_role`（人物 `front`、`side`、`full_body`、`costume`、`accessory`；场景 `wide`、`reverse`、`spatial`；道具/产品 `detail`、`held`；默认 `general`）。路由 `qc_max_cost_cny` 是用户填写的单次最高预计费用，`image_qc_budget_cny` 是每个图片任务的预计预算，默认 0；可能付费的图片/视觉请求会先预留预算，不代表实际账单上限。
 
 Gemini 账号通过 `POST /api/gateway/accounts` 添加，`PUT /api/gateway/accounts/{id}` 更新名称、凭据或启停状态，`POST /api/gateway/accounts/{id}/connect` 分别检查连接。账号目录返回每个账号的 `enabled` 和 `state`，不返回 Cookie；当前网关最多保存 8 个，停用不删除凭据。其他连接器目前各保存一套凭据。网关按添加顺序优先使用已启用账号，额度不足或部分超时可能切换账号；超时切换可能重复请求，需核对网页记录。
 

@@ -29,6 +29,8 @@ def configure(w, paid=True):
         RoutingSettings.model_validate(
             {
                 "allow_paid": paid,
+                "image_qc_budget_cny": 10,
+                "image": [{"provider": "gemini", "model": "gemini-pro", "qc_max_cost_cny": 1}],
                 "text": [
                     {"provider": "gemini", "model": "gemini-pro"},
                     {
@@ -476,6 +478,7 @@ async def test_retry_api_reuses_cloud_receipt_and_never_sends_key_to_cdn(app, cl
         RoutingSettings.model_validate(
             {
                 "allow_paid": True,
+                    "image_qc_budget_cny": 10,
                 "image": [
                     {
                         "transport": "cloud",
@@ -483,6 +486,7 @@ async def test_retry_api_reuses_cloud_receipt_and_never_sends_key_to_cdn(app, cl
                         "model": "test",
                         "base_url": "https://cloud.example/v1",
                         "api_key": "test-only-secret",
+                            "qc_max_cost_cny": 1,
                     }
                 ],
             }

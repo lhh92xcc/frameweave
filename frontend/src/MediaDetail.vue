@@ -210,6 +210,7 @@ async function prompt() {
           <summary>自动视觉初检：第 {{ artifact.metadata.visual_qc.attempt }} 次通过（仍需人工审核）</summary>
           <pre class="prompt-code">{{ JSON.stringify(artifact.metadata.visual_qc.checks, null, 2) }}</pre>
         </details>
+        <p v-if="artifact.metadata?.reference_role" class="muted small">参考图分类：{{ artifact.metadata.reference_role }}</p>
         <p class="muted small">
           请检查人物身份、风格、手部与道具、动作及剧情信息。模型执行成功不代表画面合格。
         </p>

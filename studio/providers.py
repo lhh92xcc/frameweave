@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import re
+from decimal import Decimal
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -172,13 +173,30 @@ class Providers:
                 None,
             )
             route = saved.model_copy(update={"api_key": matching.api_key if matching else None})
-            if await self.is_paid(route) and not allow_paid:
+            paid = await self.is_paid(route)
+            if paid and not allow_paid:
                 last = ProviderFailure(
                     "PAID_DISABLED", "已关闭付费渠道；请配置网页额度，或在设置中启用付费兜底", True
                 )
                 continue
             self.store.event(job["id"], f"渠道 {index + 1}：{route.provider} / {route.model}")
             try:
+                if kind in {"image", "vision"} and job["stage"] in {"reference", "keyframe"}:
+                    potentially_paid = paid or (
+                        kind == "image" and allow_paid and route.transport == "gateway" and route.provider == "gemini"
+                    )
+                    if potentially_paid:
+                        reservations = job["runtime"].setdefault("qc_cost_reservations", {})
+                        reservation_id = f"{kind}:{call_key}:{index}"
+                        if reservation_id not in reservations:
+                            cost = route.qc_max_cost_cny
+                            if not cost:
+                                raise ProviderFailure("QC_COST_UNCONFIGURED", "可能产生付费，请在生成策略填写该渠道每次请求费用上限和图片预算")
+                            reserved = sum(Decimal(str(value)) for value in reservations.values())
+                            if reserved + Decimal(str(cost)) > Decimal(str(job["snapshot"].get("image_qc_budget_cny", 0))):
+                                raise ProviderFailure("QC_BUDGET_EXHAUSTED", "本图预计费用预算不足，已停止提交；请检查任务详情")
+                            reservations[reservation_id] = cost
+                            self.checkpoint(job, qc_cost_reservations=reservations)
                 if route.transport == "gateway":
                     result = await self.gateway_generate(
                         "text" if kind == "vision" else kind,
@@ -193,7 +211,7 @@ class Providers:
                     "transport": route.transport,
                     "provider": route.provider,
                     "model": route.model,
-                    "paid": await self.is_paid(route),
+                    "paid": paid,
                 }
                 if kind not in {"text", "vision"}:
                     raw, mime = result.pop("content"), result.pop("mime")

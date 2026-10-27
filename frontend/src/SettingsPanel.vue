@@ -149,6 +149,7 @@ async function save() {
       for (const route of kind === "audio" ? [data[kind]] : data[kind]) {
         delete route.configured;
         if (route.api_key === "") delete route.api_key;
+        if (route.qc_max_cost_cny === "") route.qc_max_cost_cny = null;
       }
     }
     settings.value = await api("/settings", "PUT", data);
@@ -487,6 +488,10 @@ onMounted(load);
               图像渠道需要兼容 images/generations；绑定参考图时需要支持
               images/edits。实际输出比例由模型决定。
             </p>
+            <label v-if="['image', 'vision'].includes(kind.id)" class="field">
+              单次请求预计费用上限（元，可能付费时必填）
+              <input v-model.number="r.qc_max_cost_cny" type="number" min="0.000001" step="0.01" placeholder="例如 0.20" />
+            </label>
           </div>
           <div class="route-tools">
             <button
@@ -510,6 +515,8 @@ onMounted(load);
       <section class="settings-card">
         <div class="settings-card-heading"><div><h2>自动质检重试</h2><p>图片不合格时按问题改词重试；视觉质检失败或不可用时暂停，不进入人工审核。每次生成和质检可能产生费用。</p></div></div>
         <label class="field">每张图最多生成次数（1–5）<input type="number" min="1" max="5" v-model.number="settings.image_qc_attempts" /></label>
+        <label class="field">每张图生成与质检预计预算（元）<input type="number" min="0" step="0.01" v-model.number="settings.image_qc_budget_cny" /></label>
+        <p class="muted small">默认 0 元，不允许可能付费的生图或质检请求；允许付费时须为每个相关渠道填写单次最高预估。预算按提交预留，重试和兜底均计入；仅按填写的单价控制，无法限制供应商实际账单。Gemini 开启付费兜底时也须填写。</p>
       </section>
       <section class="settings-card">
         <div class="settings-card-heading">

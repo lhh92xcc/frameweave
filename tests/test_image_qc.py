@@ -39,6 +39,7 @@ async def test_offline_qc_repairs_then_only_saves_passing_candidate(app, client,
     saved = workflow.store.job(job["id"])
     assert saved["status"] == "succeeded"
     assert len(prompts) == 2 and "修正左手持物" in prompts[1]
+    assert '"identity"' in prompts[1] and "offline fixture" in prompts[1]
     assert approved["contract"]["markdown"] in prompts[0] and approved["contract"]["markdown"] in prompts[1]
     assert len(vision_inputs) == 2 and vision_inputs[0][-1] != vision_inputs[1][-1]
     assert len(workflow.store.artifacts(approved["id"])) == 1
@@ -115,7 +116,7 @@ def test_offline_previous_keyframe_dependency_goes_stale(app, client, project):
 @pytest.mark.asyncio
 async def test_offline_cloud_vision_receives_candidate_and_references(app, client, project, monkeypatch):
     workflow = app.state.workflow
-    workflow.settings.save(RoutingSettings.model_validate({"allow_paid": True, "vision": [{"transport": "cloud", "provider": "cloud", "model": "vision", "base_url": "https://vision.example/v1", "api_key": "secret"}]}))
+    workflow.settings.save(RoutingSettings.model_validate({"allow_paid": True, "image_qc_budget_cny": 1, "vision": [{"transport": "cloud", "provider": "cloud", "model": "vision", "base_url": "https://vision.example/v1", "api_key": "secret", "qc_max_cost_cny": 0.1}]}))
     approved = approve_with_plan(client, project)
     job = workflow.enqueue(approved["id"], "reference", "lin")
     image = workflow.store.media / "fixture.png"
@@ -192,3 +193,86 @@ async def test_offline_qc_recovery_keeps_generated_candidate(app, client, projec
     await workflow.execute(resumed)
     assert workflow.store.job(job["id"])["status"] == "succeeded"
     assert calls == {"image": 2, "vision": 2}
+
+
+@pytest.mark.asyncio
+async def test_offline_budget_blocks_paid_requests_before_submission(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    workflow.settings.save(RoutingSettings.model_validate({
+        "allow_paid": True,
+        "image_qc_budget_cny": 0.15,
+        "vision": [{"transport": "cloud", "provider": "cloud", "model": "vision", "base_url": "https://vision.example/v1", "api_key": "offline", "qc_max_cost_cny": 0.1}],
+    }))
+    approved = approve_with_plan(client, project)
+    job = workflow.enqueue(approved["id"], "reference", "lin")
+    image = workflow.store.media / "fixture.png"
+    image.write_bytes((Path(__file__).parent / "fixtures/reference.png").read_bytes())
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": qc()}}]})
+
+    monkeypatch.setattr(workflow.providers.client, "_transport", httpx.MockTransport(handler))
+    await workflow.providers.generate("vision", job, "offline check 1", [image])
+    await workflow.providers.generate("vision", job, "offline check 1", [image])
+    with pytest.raises(ProviderFailure, match="预算不足"):
+        await workflow.providers.generate("vision", job, "offline check 2", [image])
+    assert len(requests) == 1
+    assert list(job["runtime"]["qc_cost_reservations"].values()) == [0.1]
+
+
+def test_offline_reference_role_validation_and_approval_revocation(app, client, project):
+    workflow = app.state.workflow
+    approved = approve_with_plan(client, project)
+    png = (Path(__file__).parent / "fixtures/reference.png").read_bytes()
+    path = f"/api/projects/{approved['id']}/upload"
+    invalid = client.post(path, data={"stage": "reference", "entity_id": "lin", "reference_role": "wide"}, files={"file": ("reference.png", png, "image/png")})
+    assert invalid.status_code == 422
+    source = client.post(path, data={"stage": "reference", "entity_id": "lin", "reference_role": "front"}, files={"file": ("reference.png", png, "image/png")}).json()
+    assert source["metadata"]["reference_role"] == "front"
+    assert client.post(f"/api/artifacts/{source['id']}/review", json={"approved": True}).status_code == 200
+    keyframe = client.post(path, data={"stage": "keyframe", "entity_id": "ep1_s01"}, files={"file": ("frame.png", png, "image/png")}).json()
+    assert client.post(f"/api/artifacts/{keyframe['id']}/review", json={"approved": True}).status_code == 200
+    p = workflow.store.project(approved["id"])
+    assert workflow.latest(p, "keyframe", "ep1_s01") is not None
+    assert client.post(f"/api/artifacts/{source['id']}/review", json={"approved": False}).status_code == 200
+    assert workflow.latest(p, "keyframe", "ep1_s01") is None
+    assert client.post(f"/api/artifacts/{source['id']}/review", json={"approved": True}).status_code == 200
+    assert workflow.latest(p, "keyframe", "ep1_s01") is None
+
+
+def test_offline_reclassify_invalidates_even_after_reapproval(app, client, project):
+    workflow = app.state.workflow
+    approved = approve_with_plan(client, project)
+    png = (Path(__file__).parent / "fixtures/reference.png").read_bytes()
+    path = f"/api/projects/{approved['id']}/upload"
+    source = client.post(path, data={"stage": "reference", "entity_id": "lin"}, files={"file": ("reference.png", png, "image/png")}).json()
+    client.post(f"/api/artifacts/{source['id']}/review", json={"approved": True})
+    frame = client.post(path, data={"stage": "keyframe", "entity_id": "ep1_s01"}, files={"file": ("frame.png", png, "image/png")}).json()
+    client.post(f"/api/artifacts/{frame['id']}/review", json={"approved": True})
+    changed = client.put(f"/api/artifacts/{source['id']}/reference-role", json={"role": "side"})
+    assert changed.status_code == 200 and changed.json()["review"] == "pending"
+    assert client.post(f"/api/artifacts/{source['id']}/review", json={"approved": True}).status_code == 200
+    assert workflow.latest(workflow.store.project(approved["id"]), "keyframe", "ep1_s01") is None
+
+
+@pytest.mark.asyncio
+async def test_offline_required_identity_cannot_be_marked_not_applicable(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    approved = approve_with_plan(client, project)
+
+    async def generate(kind, job, prompt, refs=(), **kwargs):
+        if kind == "image":
+            name = kwargs["output"] + ".png"
+            (workflow.store.media / name).write_bytes(b"offline")
+            return {"file": name, "mime": "image/png", "metadata": {"aspect_matches": True}}
+        result = json.loads(qc())
+        result["checks"]["identity"] = {"result": "not_applicable", "finding": "offline"}
+        return {"text": json.dumps(result)}
+
+    monkeypatch.setattr(workflow.providers, "generate", generate)
+    job = workflow.enqueue(approved["id"], "reference", "lin")
+    await workflow.execute(job)
+    assert workflow.store.job(job["id"])["error"]["code"] == "VISION_INVALID"
+    assert not workflow.store.artifacts(approved["id"])

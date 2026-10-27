@@ -28,7 +28,18 @@ const props = defineProps<{
     library: [projectId: string];
   }>();
 const fileInput = ref<HTMLInputElement>(),
-  uploadTarget = ref("");
+  uploadTarget = ref(""),
+  uploadReferenceRoles = ref<Record<string, string>>({});
+const referenceRoleNames: Record<string, string> = {
+  general: "标准参考", front: "人物正面", side: "人物侧面", full_body: "人物全身",
+  costume: "服装", accessory: "配饰", wide: "场景全景", reverse: "场景反打",
+  spatial: "空间关系", detail: "道具细节", held: "持握状态",
+};
+const referenceRoles: Record<string, string[]> = {
+  character: ["general", "front", "side", "full_body", "costume", "accessory"],
+  location: ["general", "wide", "reverse", "spatial"],
+  prop: ["general", "detail", "held"], product: ["general", "detail", "held"],
+};
 const stage = ref("requirements"),
   imageTab = ref("reference"),
   episodeIndex = ref(0),
@@ -125,6 +136,10 @@ const previousShots = computed(() => {
   const index = shots.value.findIndex((shot: any) => shot.id === referenceShot.value?.id);
   return shots.value.slice(0, Math.max(index, 0)).filter((shot: any) => artifact("keyframe", shot.id)?.review === "approved");
 });
+async function changeReferenceRole(item: Artifact, event: Event) {
+  const role = (event.target as HTMLSelectElement).value;
+  await action(() => api(`/artifacts/${item.id}/reference-role`, "PUT", { role }), "参考图已分类，请重新审核后使用。");
+}
 async function saveReferences() {
   await action(() => api(`/projects/${p.value.id}/shots/${referenceShot.value.id}/references`, "PUT", {
     artifact_ids: extraReferences.value,
@@ -299,6 +314,8 @@ async function upload(event: Event) {
   const form = new FormData();
   form.set("stage", activeKind.value);
   form.set("entity_id", uploadTarget.value);
+  if (activeKind.value === "reference")
+    form.set("reference_role", uploadReferenceRoles.value[uploadTarget.value] || "general");
   form.set("file", file);
   await action(async () => {
     const response = await fetch("/api/projects/" + p.value.id + "/upload", {
@@ -960,6 +977,13 @@ async function reviewSelected(approved: boolean) {
               <button v-if="activeKind === 'keyframe'" class="text-button" :disabled="!readyForMedia" @click="openReferences(entity)">
                 <Icon name="link" :size="13" />配置多角度参考与前镜
               </button>
+              <label v-if="activeKind === 'reference'" class="field small">
+                上传参考分类
+                <select v-model="uploadReferenceRoles[entity.id]">
+                  <option :value="undefined">标准参考</option>
+                  <option v-for="role in (referenceRoles[entity.kind] || []).filter((value) => value !== 'general')" :key="role" :value="role">{{ referenceRoleNames[role] }}</option>
+                </select>
+              </label>
               <button
                 v-if="activeKind !== 'render'"
                 class="text-button audio-generate"
@@ -1022,9 +1046,21 @@ async function reviewSelected(approved: boolean) {
           <label v-for="item in eligibleReferences" :key="item.id">
             <input v-model="extraReferences" type="checkbox" :value="item.id" />
             <img :src="item.url" alt="参考图" style="width:72px;height:72px;object-fit:cover" />
-            {{ project.plan.assets.find((asset: any) => asset.id === item.entity_id)?.name || item.entity_id }} · {{ item.id }}
+            {{ project.plan.assets.find((asset: any) => asset.id === item.entity_id)?.name || item.entity_id }} · {{ referenceRoleNames[item.metadata?.reference_role || 'general'] }} · {{ item.id }}
           </label>
         </div>
+        <details>
+          <summary>整理或审核当前分镜的分层参考图</summary>
+          <p class="muted small">切换分类会撤销该图及下游用途的批准；重新查看图片并审核后才能绑定。</p>
+          <div v-for="item in project.artifacts.filter((candidate: Artifact) => candidate.kind === 'reference' && !candidate.archived && candidate.contract_revision === project.contract.revision && candidate.plan_revision === project.plan_revision && referenceShot.asset_ids.includes(candidate.entity_id))" :key="item.id" class="route-row">
+            <img :src="item.url" alt="参考图" style="width:72px;height:72px;object-fit:cover" />
+            <span>{{ project.plan.assets.find((asset: any) => asset.id === item.entity_id)?.name }} · {{ statusText[item.review] || item.review }}</span>
+            <select :value="item.metadata?.reference_role || 'general'" :disabled="busy" @change="changeReferenceRole(item, $event)">
+              <option v-for="role in referenceRoles[project.plan.assets.find((asset: any) => asset.id === item.entity_id)?.kind] || ['general']" :key="role" :value="role">{{ referenceRoleNames[role] }}</option>
+            </select>
+            <button v-if="item.review !== 'approved'" class="text-button" :disabled="busy" @click="action(() => api('/artifacts/' + item.id + '/review', 'POST', { approved: true }), '参考图已批准')">批准该图</button>
+          </div>
+        </details>
         <p v-if="!eligibleReferences.length" class="muted">尚无已批准的绑定素材参考图。</p>
         <label class="field">已批准的前镜连续性参考<select v-model="previousShot"><option value="">不使用前镜</option><option v-for="shot in previousShots" :key="shot.id" :value="shot.id">{{ shot.title }} · {{ shot.id }}</option></select></label>
         <p class="muted small">网页渠道通常最多 10 张图；视觉质检还需额外上传候选图，超过渠道上限会暂停而不会遗漏参考。</p>

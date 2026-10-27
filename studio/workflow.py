@@ -53,7 +53,7 @@ class VisualQC(BaseModel):
     correction: str = Field(default="", max_length=3000)
 
 
-QC_CHECKS = {"identity", "costume", "location", "props", "continuity", "composition", "story"}
+QC_CHECKS = {"identity", "costume", "location", "props", "spatial_sides", "continuity", "composition", "story"}
 
 
 class Workflow:
@@ -137,14 +137,33 @@ class Workflow:
             or candidate["plan_revision"] != p["plan_revision"]
         ):
             return None
+        if not p["contract"]["approved"] or not p.get("plan_approved"):
+            if kind != "reference":
+                return None
+        if check_dependencies:
+            try:
+                versions = self.dependency_versions(candidate.get("dependencies", []))
+                if candidate.get("dependency_versions", {key: 0 for key in versions}) != versions:
+                    return None
+            except KeyError:
+                return None
+        if check_dependencies and kind == "reference" and candidate.get("dependencies"):
+            try:
+                for source_id in candidate["dependencies"]:
+                    self.reference_source(p, entity_id, source_id)
+            except (ValueError, KeyError):
+                return None
         if check_dependencies and kind not in {"reference", "audio"}:
             try:
-                expected = self.dependencies(p, kind, entity_id, require_approved=False)
+                expected = self.dependencies(p, kind, entity_id)
             except (ValueError, KeyError):
                 return None
             if candidate["dependencies"] != expected:
                 return None
         return candidate
+
+    def dependency_versions(self, ids):
+        return {id_: self.store.artifact(id_).get("review_version", 0) for id_ in ids}
 
     def dependencies(self, p, stage, entity_id, require_approved=True):
         if stage in {"requirements", "plan", "reference", "audio"}:
@@ -178,6 +197,8 @@ class Workflow:
                     or artifact["review"] != "approved"
                 ):
                     raise ValueError("额外参考图不属于当前已批准的绑定素材，请重新选择")
+                for source_id in artifact.get("dependencies", []):
+                    self.reference_source(p, artifact["entity_id"], source_id)
                 if artifact_id not in result:
                     result.append(artifact_id)
             previous_id = binding.get("previous_shot_id")
@@ -274,6 +295,7 @@ class Workflow:
             "voice": settings.voice,
             "subtitles": settings.subtitles,
             "image_qc_attempts": settings.image_qc_attempts,
+            "image_qc_budget_cny": settings.image_qc_budget_cny,
             "settings_fingerprint": self.settings.fingerprint(),
             "dependencies": self.dependencies(p, stage, entity_id),
         }
@@ -295,11 +317,17 @@ class Workflow:
             }
         else:
             result.update(entity=self.entity(p, stage, entity_id), aspect_ratio=p["aspect_ratio"])
+            if stage == "keyframe":
+                result["bound_asset_kinds"] = sorted({
+                    asset["kind"] for asset in p["plan"]["assets"]
+                    if asset["id"] in result["entity"]["asset_ids"]
+                })
         if stage == "reference" and not reference_upload:
             source = self.reference_source(p, entity_id, reference_source_id)
             current = self.latest(p, "reference", entity_id)
             result["dependencies"] = [source["id"]] if source else []
             result["reference_base_id"] = current["id"] if current else None
+        result["dependency_versions"] = self.dependency_versions(result["dependencies"])
         return result
 
     def enqueue(self, project_id, stage, entity_id="", force=False, retry_of=None, reference_source_id=None):
@@ -361,12 +389,26 @@ class Workflow:
         p = self.store.project(a["project_id"])
         current = self.latest(p, a["kind"], a["entity_id"])
         if not current or current["id"] != artifact_id:
-            raise Conflict("该素材已过期，不能用于当前版本")
+            reusable_reference = (
+                a["kind"] == "reference" and a["contract_hash"] == p["contract"]["hash"]
+                and a["plan_revision"] == p["plan_revision"]
+                and (a["review"] == "approved" or a.get("metadata", {}).get("reference_role"))
+            )
+            if not reusable_reference:
+                raise Conflict("该素材已过期，不能用于当前版本")
+            for source_id in a.get("dependencies", []):
+                self.reference_source(p, a["entity_id"], source_id)
+            versions = self.dependency_versions(a.get("dependencies", []))
+            if a.get("dependency_versions", {key: 0 for key in versions}) != versions:
+                raise Conflict("该参考图的来源审核已变化，请重新生成")
         if not p["contract"]["approved"] or not p["plan_approved"]:
             raise ValueError("请先批准当前规范和分镜")
         if expected_review is not None and a["review"] != expected_review:
             raise Conflict("素材审核状态已变化，请刷新后重新选择")
+        if a["review"] == ("approved" if approved else "rejected") and a.get("review_note", "") == note:
+            return a
         a.update(review="approved" if approved else "rejected", review_note=note, reviewed_at=now())
+        a["review_version"] = a.get("review_version", 0) + 1
         self.store.save_artifact(a)
         self.wake.set()
         return a
@@ -808,6 +850,12 @@ class Workflow:
                 raise ProviderFailure("STALE_DEPENDENCY", "参考原图已变化，请重新创建任务")
         elif s["dependencies"] != self.dependencies(p, job["stage"], job["entity_id"]):
             raise ProviderFailure("STALE_DEPENDENCY", "依赖素材或审核状态已变化，请重新创建任务")
+        try:
+            versions = self.dependency_versions(s["dependencies"])
+            if s.get("dependency_versions", {key: 0 for key in versions}) != versions:
+                raise ProviderFailure("STALE_DEPENDENCY", "依赖素材的审核或分类已变化，请重新创建任务")
+        except KeyError as exc:
+            raise ProviderFailure("STALE_DEPENDENCY", "依赖素材已不存在，请重新创建任务") from exc
 
     async def media(self, job):
         s, entity = job["snapshot"], job["snapshot"]["entity"]
@@ -840,6 +888,7 @@ class Workflow:
                         "artifact_id": id_,
                         "entity_id": self.store.artifact(id_)["entity_id"],
                         "kind": self.store.artifact(id_)["kind"],
+                        "reference_role": self.store.artifact(id_).get("metadata", {}).get("reference_role", "general"),
                     }
                     for id_ in s["dependencies"]
                 ],
@@ -887,7 +936,14 @@ class Workflow:
         while len(attempts) < max_attempts:
             self.assert_current(job)
             number = len(attempts) + 1
-            correction = attempts[-1]["qc"]["correction"] if attempts else ""
+            correction = ""
+            if attempts:
+                previous_qc = attempts[-1]["qc"]
+                findings = {
+                    key: check for key, check in previous_qc["checks"].items()
+                    if check["result"] in {"fail", "uncertain"}
+                }
+                correction = json.dumps(findings, ensure_ascii=False) + "\n" + previous_qc["correction"]
             prompt = base_prompt + f"\n图片生成尝试 {number}。"
             if correction:
                 prompt += (
@@ -908,7 +964,8 @@ class Workflow:
                 base_prompt + "\n\n你是严格的视觉质检员。按图片上传顺序，最后一张是待检候选，其余是已批准参考图。"
                 "对照规范、绑定和镜头要求逐项检查。不能确认时标 uncertain，不适用须说明依据。"
                 "只返回 JSON 对象：checks 必须包含 identity、costume、location、props、continuity、"
-                "composition、story 七项，每项包含 result（pass、fail、uncertain、not_applicable）和 finding；"
+                "spatial_sides（左右、持物手和空间关系）、composition、story 八项，每项包含 "
+                "result（pass、fail、uncertain、not_applicable）和 finding；"
                 "correction 为针对失败或不确定项的具体画面修正，不得修改已批准规范。"
             )
             if job["runtime"].get("qc_retry_nonce"):
@@ -922,8 +979,22 @@ class Workflow:
                 qc = VisualQC.model_validate_json(raw)
                 if set(qc.checks) != QC_CHECKS:
                     raise ValueError("missing checks")
-                if any(qc.checks[key].result == "not_applicable" for key in ("composition", "story")):
-                    raise ValueError("composition and story must be checked")
+                required = {"composition"}
+                if job["stage"] == "keyframe":
+                    required.update({"story", "spatial_sides"})
+                kinds = set(snapshot.get("bound_asset_kinds", []))
+                if job["stage"] == "reference":
+                    kinds.add(snapshot["entity"]["kind"])
+                if "character" in kinds:
+                    required.update({"identity", "costume"})
+                if "location" in kinds:
+                    required.add("location")
+                if kinds & {"prop", "product"}:
+                    required.add("props")
+                if len(refs) > 0:
+                    required.add("continuity")
+                if any(qc.checks[key].result == "not_applicable" for key in required):
+                    raise ValueError("required checks cannot be marked not applicable")
                 passed = all(check.result in {"pass", "not_applicable"} for check in qc.checks.values())
                 if result["metadata"].get("aspect_matches") is False:
                     qc.checks["composition"] = VisualCheck(result="fail", finding="图片比例不符合项目要求")
@@ -935,7 +1006,10 @@ class Workflow:
                 raise ProviderFailure("VISION_INVALID", "视觉质检结果不完整，已暂停；不会把候选图送入人工审核") from exc
             if passed:
                 result["metadata"]["visual_qc"] = {"attempt": number, **qc.model_dump(), "route": response.get("route")}
-            record = {"attempt": number, "prompt": prompt, "result": result, "qc": qc.model_dump(), "passed": passed}
+            record = {
+                "attempt": number, "prompt": prompt, "result": result,
+                "qc": qc.model_dump(), "qc_route": response.get("route"), "passed": passed,
+            }
             attempts.append(record)
             job["runtime"].pop("pending_qc_image", None)
             self.store.save_job(job)
@@ -968,6 +1042,7 @@ class Workflow:
             "contract_revision": s["contract"]["revision"],
             "plan_revision": s["plan_revision"],
             "dependencies": s["dependencies"],
+            "dependency_versions": s.get("dependency_versions", {}),
             "review": "pending",
             "created_at": now(),
         }

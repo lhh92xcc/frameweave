@@ -83,6 +83,7 @@ def add_artifact(workflow, p, kind, entity_id, deps=(), review="pending"):
         "contract_revision": p["contract"]["revision"],
         "plan_revision": p["plan_revision"],
         "dependencies": list(deps),
+        "dependency_versions": workflow.dependency_versions(deps),
         "review": review,
         "created_at": now(),
     }

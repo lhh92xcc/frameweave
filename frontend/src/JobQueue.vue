@@ -212,6 +212,7 @@ onUnmounted(() => clearInterval(timer));
           <summary>自动视觉质检与候选图（{{ detail.runtime.image_qc_attempts.length }} 次）</summary>
           <div v-for="attempt in detail.runtime.image_qc_attempts" :key="attempt.attempt">
             <p>第 {{ attempt.attempt }} 次 · {{ attempt.passed ? '初检通过，仍需人工审核' : '未通过' }}</p>
+            <p class="muted small">生图：{{ attempt.result?.route?.provider || '未知' }} / {{ attempt.result?.route?.model || '未知' }}；质检：{{ attempt.qc_route?.provider || '未知' }} / {{ attempt.qc_route?.model || '未知' }}</p>
             <a :href="`/api/jobs/${detail.id}/image-attempts/${attempt.attempt}`" target="_blank" rel="noopener">查看候选原图</a>
             <pre class="prompt-code">{{ JSON.stringify(attempt.qc, null, 2) }}</pre>
             <details><summary>本次生图提示词</summary><pre class="prompt-code">{{ attempt.prompt }}</pre></details>
@@ -221,6 +222,10 @@ onUnmounted(() => clearInterval(timer));
           候选图已生成但质检未完成，未进入人工审核。
           <a :href="`/api/jobs/${detail.id}/image-attempts/${detail.runtime.pending_qc_image.attempt}`" target="_blank" rel="noopener">查看候选图</a>
         </p>
+        <details v-if="detail.runtime?.qc_cost_reservations">
+          <summary>已预留的预计请求费用（元，非实际账单）</summary>
+          <pre class="prompt-code">{{ JSON.stringify(detail.runtime.qc_cost_reservations, null, 2) }}</pre>
+        </details>
         <details>
           <summary>输入快照与完整提示词</summary>
           <pre class="prompt-code">{{

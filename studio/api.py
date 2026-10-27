@@ -21,9 +21,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from studio.catalog import TEMPLATES
 from studio.cloud_storage import CloudStorageError, CosSettings
 from studio.models import (
+    REFERENCE_ROLES,
     ContractEdit,
     PlanEdit,
     ProjectCreate,
+    ReferenceRoleEdit,
     Review,
     RoutingSettings,
     RunRequest,
@@ -336,11 +338,18 @@ def create_app(data_dir=None, start_worker=True, transport=None):
 
     @app.post("/api/projects/{project_id}/upload", status_code=201)
     async def upload(
-        project_id: str, stage: str = Form(...), entity_id: str = Form(...), file: UploadFile = File(...)
+        project_id: str, stage: str = Form(...), entity_id: str = Form(...), file: UploadFile = File(...),
+        reference_role: str = Form(default="general"),
     ):
         if stage not in {"reference", "keyframe", "video", "audio"}:
             raise ValueError("不支持该素材类型")
         p = store.project(project_id)
+        if stage == "reference":
+            asset = workflow.entity(p, "reference", entity_id)
+            if reference_role not in REFERENCE_ROLES[asset["kind"]]:
+                raise ValueError("参考图分类与素材类型不匹配")
+        elif reference_role != "general":
+            raise ValueError("只有素材参考图可以设置参考分类")
         snapshot = workflow.snapshot(p, stage, entity_id, allow_unapproved_reference=stage == "reference")
         chunks, size = [], 0
         while chunk := await file.read(1024 * 1024):
@@ -359,6 +368,8 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                 with Image.open(io.BytesIO(raw)) as image:
                     mime = Image.MIME[image.format]
                     metadata = {"width": image.width, "height": image.height, "format": image.format}
+                    if stage == "reference":
+                        metadata["reference_role"] = reference_role
                     w, h = map(int, p["aspect_ratio"].split(":"))
                     metadata["aspect_matches"] = abs(image.width / image.height - w / h) < 0.015
             except (OSError, ValueError, KeyError, UnidentifiedImageError) as exc:
@@ -417,6 +428,29 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     @app.post("/api/artifacts/{artifact_id}/review")
     async def review(artifact_id: str, body: Review):
         return workflow.review(artifact_id, body.approved, body.note, body.expected_review)
+
+    @app.put("/api/artifacts/{artifact_id}/reference-role")
+    async def reference_role(artifact_id: str, body: ReferenceRoleEdit):
+        artifact = store.artifact(artifact_id)
+        project = store.project(artifact["project_id"])
+        if artifact["kind"] != "reference" or artifact.get("archived"):
+            raise ValueError("仅当前项目的参考图可以分类")
+        if artifact["contract_hash"] != project["contract"]["hash"] or artifact["plan_revision"] != project["plan_revision"]:
+            raise ValueError("旧版本参考图不能重新分类")
+        asset = workflow.entity(project, "reference", artifact["entity_id"])
+        if body.role not in REFERENCE_ROLES[asset["kind"]]:
+            raise ValueError("参考图分类与素材类型不匹配")
+        old_role = artifact.get("metadata", {}).get("reference_role", "general")
+        if old_role == body.role:
+            return artifact
+        artifact.setdefault("metadata", {})["reference_role"] = body.role
+        artifact["review"] = "pending"
+        artifact["review_version"] = artifact.get("review_version", 0) + 1
+        artifact.pop("reviewed_at", None)
+        artifact.pop("review_note", None)
+        store.save_artifact(artifact)
+        workflow.wake.set()
+        return artifact
 
     @app.get("/api/artifacts/{artifact_id}/content")
     async def media(artifact_id: str, download: bool = False):
