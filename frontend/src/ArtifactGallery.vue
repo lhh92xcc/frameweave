@@ -11,6 +11,7 @@ import {
 import Icon from "./Icon.vue";
 import MediaDetail from "./MediaDetail.vue";
 import ArtifactSource from "./ArtifactSource.vue";
+import VoiceLibraryPanel from "./VoiceLibraryPanel.vue";
 const emit = defineEmits<{ notify: [message: string] }>(),
   artifacts = ref<Artifact[]>([]),
   filter = ref("all"),
@@ -190,6 +191,7 @@ onMounted(load);
         </button>
       </div>
     </div>
+    <VoiceLibraryPanel />
     <div v-if="hasCuration" class="curation-summary notice">
       <div>
         <strong>当前制作素材：选定参考与待复核候选</strong>

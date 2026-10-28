@@ -259,7 +259,7 @@ test("offline fixture: a draft reference can be uploaded and previewed without g
     .click();
   await expect(page.getByText(/可以先导入角色/)).toBeVisible();
   await expect(page.getByRole("region", { name: "批量审核" })).toHaveCount(0);
-  const first = page.locator(".media-card").filter({ hasText: "人物" });
+  const first = page.locator(".media-card").filter({ has: page.getByRole("heading", { name: "人物", exact: true }) });
   await expect(
     first.getByRole("button", { name: "生成", exact: true }),
   ).toBeDisabled();
@@ -391,7 +391,7 @@ test("offline fixture: image and video cards identify recorded source and fallba
   await mockStudio(page, fixture);
   await page.goto("/#project/project_progress");
   await page.locator(".pipeline-step").filter({ hasText: "素材参考" }).click();
-  const card = (name: string) => page.locator(".media-card").filter({ hasText: name });
+  const card = (name: string) => page.locator(".media-card").filter({ has: page.getByRole("heading", { name, exact: true }) });
   await expect(card("人物")).toContainText("Seedream（火山方舟） · 付费");
   await expect(card("人物")).toContainText("doubao-seedream-5-0-flash-260915");
   await expect(card("场景")).toContainText("Gemini 网页");
@@ -451,7 +451,7 @@ test("offline fixture: reference regeneration shows the uploaded source and its 
     .locator(".pipeline-steps")
     .getByRole("button", { name: /素材参考/ })
     .click();
-  const first = page.locator(".media-card").filter({ hasText: "人物" });
+  const first = page.locator(".media-card").filter({ has: page.getByRole("heading", { name: "人物", exact: true }) });
   await expect(first).toContainText("重新生成将使用已批准的上传原图");
   await first.getByRole("button", { name: "审核", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "素材预览与审核" });

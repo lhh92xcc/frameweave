@@ -30,6 +30,13 @@ class SettingsStore:
     def save(self, value: RoutingSettings):
         previous = self.get().model_dump()
         data = value.model_dump()
+        def audio_signature(config):
+            return {key: config[key] for key in ("audio_mode", "voice", "speech")} | {
+                "audio": {key: config["audio"][key] for key in ("transport", "provider", "base_url", "model")}
+            }
+
+        # Voice edits remain invalidating even when the user later restores an old value.
+        data["audio_revision"] = previous["audio_revision"] + int(audio_signature(data) != audio_signature(previous))
         for kind in ["text", "image", "vision", "video", "audio"]:
             entries = [data[kind]] if kind == "audio" else data[kind]
             old_entries = [previous[kind]] if kind == "audio" else previous[kind]

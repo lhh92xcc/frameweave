@@ -12,9 +12,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 from studio.catalog import baseline_contract
 from studio.cloud_storage import CloudStorageError, CosStorage
+from studio.minimax import MiniMaxRejected
+from studio.minimax import synthesize as minimax_synthesize
 from studio.models import Asset, ProductionPlan, ProjectCreate, Shot
 from studio.providers import ProviderFailure, requires_verification
 from studio.store import Conflict, digest, now, uid
+from studio.voice_library import VoiceLibrary
 
 STAGE_LABELS = {
     "requirements": "制作规范",
@@ -60,6 +63,7 @@ class Workflow:
     def __init__(self, store, settings, providers):
         self.store, self.settings, self.providers = store, settings, providers
         self.cloud = CosStorage(store.root)
+        self.voice_library = VoiceLibrary(store)
         self.runner = None
         self.wake = asyncio.Event()
         self.stopping = False
@@ -140,6 +144,13 @@ class Workflow:
         if not p["contract"]["approved"] or not p.get("plan_approved"):
             if kind != "reference":
                 return None
+        if kind in {"audio", "render"}:
+            fingerprint = candidate.get("audio_fingerprint")
+            minimax = self.settings.get().audio_mode == "cloud" and self.settings.get().audio.provider == "minimax"
+            if (fingerprint and fingerprint != self.audio_fingerprint(p, kind, entity_id)) or (
+                not fingerprint and minimax
+            ):
+                return None
         if check_dependencies:
             try:
                 versions = self.dependency_versions(candidate.get("dependencies", []))
@@ -164,6 +175,66 @@ class Workflow:
 
     def dependency_versions(self, ids):
         return {id_: self.store.artifact(id_).get("review_version", 0) for id_ in ids}
+
+    def voice_profile(self, p, shot_id):
+        settings = self.settings.get()
+        profile = {"voice_id": settings.voice, **settings.speech.model_dump(exclude_none=True)}
+        speaker = None
+        if settings.audio_mode == "cloud" and settings.audio.provider == "minimax":
+            cast = p.get("audio_cast", {})
+            speaker = cast.get("speakers", {}).get(shot_id)
+            if speaker in cast.get("voices", {}):
+                profile = cast["voices"][speaker]
+            self.voice_library.validate_profile(profile)
+        return {"speaker_id": speaker, "voice_setting": profile}
+
+    def audio_fingerprint(self, p, stage, entity_id):
+        settings = self.settings.get()
+        ids = [entity_id] if stage == "audio" else [
+            shot["id"] for shot in self.entity(p, "render", entity_id)["shots"]
+            if shot["dialogue"] or shot["narration"]
+        ]
+        route = {k: v for k, v in settings.audio.model_dump().items()
+                 if k not in {"api_key", "clear_key", "qc_max_cost_cny"}}
+        return digest({
+            "mode": settings.audio_mode,
+            "revision": settings.audio_revision,
+            "route": route if settings.audio_mode == "cloud" else None,
+            "profiles": {id_: self.voice_profile(p, id_) for id_ in ids}
+            if settings.audio_mode in {"cloud", "edge"} else {},
+            "subtitles": settings.subtitles if stage == "render" else None,
+            "cast_versions": {id_: p.get("audio_cast_versions", {}).get(id_, 0) for id_ in ids}
+            if settings.audio_mode == "cloud" and settings.audio.provider == "minimax" else {},
+        })
+
+    def set_audio_cast(self, project_id, voices, speakers, expected_version):
+        p = self.store.project(project_id)
+        if p["version"] != expected_version:
+            raise Conflict("项目已更新，请刷新后重试")
+        characters = {a["id"] for a in (p.get("plan") or {}).get("assets", []) if a["kind"] == "character"}
+        if set(voices) - (characters | {"narrator"}):
+            raise ValueError("配音角色必须来自当前分镜的人物素材或旁白")
+        for profile in voices.values():
+            self.voice_library.validate_profile(profile)
+        shots = {s["id"]: s for s in self.shots(p)}
+        for shot_id, speaker in speakers.items():
+            if shot_id not in shots or not (shots[shot_id]["dialogue"] or shots[shot_id]["narration"]):
+                raise ValueError("说话者只能绑定当前有对白或旁白的分镜")
+            if speaker not in voices:
+                raise ValueError("请先为说话者设置声线")
+        value = {"voices": voices, "speakers": speakers}
+        if p.get("audio_cast") != value:
+            old = p.get("audio_cast", {})
+            versions = p.setdefault("audio_cast_versions", {})
+            for shot_id in shots:
+                before = old.get("speakers", {}).get(shot_id)
+                after = speakers.get(shot_id)
+                if (before, old.get("voices", {}).get(before)) != (after, voices.get(after)):
+                    versions[shot_id] = versions.get(shot_id, 0) + 1
+            p["audio_cast"] = value
+            self.store.save_project(p, expected_version)
+            self.wake.set()
+        return p
 
     def dependencies(self, p, stage, entity_id, require_approved=True):
         if stage in {"requirements", "plan", "reference", "audio"}:
@@ -317,6 +388,13 @@ class Workflow:
             }
         else:
             result.update(entity=self.entity(p, stage, entity_id), aspect_ratio=p["aspect_ratio"])
+            if stage in {"audio", "render"}:
+                result["audio_fingerprint"] = self.audio_fingerprint(p, stage, entity_id)
+                result["audio_cast"] = p.get("audio_cast", {})
+                result["audio_cast_versions"] = p.get("audio_cast_versions", {})
+                result["shot_reference_bindings"] = p.get("shot_reference_bindings", {})
+                if stage == "audio":
+                    result["audio_binding"] = self.voice_profile(p, entity_id)
             if stage == "keyframe":
                 result["bound_asset_kinds"] = sorted({
                     asset["kind"] for asset in p["plan"]["assets"]
@@ -366,6 +444,8 @@ class Workflow:
         p["plan"] = self.check_plan(p, plan)
         p["plan_revision"] += 1
         p["shot_reference_bindings"] = {}
+        p.pop("audio_cast", None)
+        p.pop("audio_cast_versions", None)
         p["plan_approved"] = False
         p["plan_contract_hash"] = p["contract"]["hash"]
         return self.store.save_project(p, p["version"])
@@ -832,6 +912,9 @@ class Workflow:
             raise ProviderFailure("STALE_INPUT", "制作规范未批准，不能继续生成")
         if job["stage"] not in {"requirements", "plan"} and not p["plan_approved"]:
             raise ProviderFailure("STALE_INPUT", "分镜未批准，不能继续生成")
+        if job["stage"] in {"audio", "render"} and s.get("audio_fingerprint"):
+            if s["audio_fingerprint"] != self.audio_fingerprint(p, job["stage"], job["entity_id"]):
+                raise ProviderFailure("STALE_INPUT", "配音方式、角色声线或声音参数已变化，请创建新任务")
         if job["stage"] == "reference" and "reference_base_id" in s:
             try:
                 for source_id in s["dependencies"]:
@@ -1046,6 +1129,8 @@ class Workflow:
             "review": "pending",
             "created_at": now(),
         }
+        if job["stage"] in {"audio", "render"} and s.get("audio_fingerprint"):
+            value["audio_fingerprint"] = s["audio_fingerprint"]
         self.store.save_artifact(value)
         job["artifact_id"] = artifact_id
         self.store.save_job(job)
@@ -1053,12 +1138,19 @@ class Workflow:
 
     async def audio(self, job):
         s, entity = job["snapshot"], job["snapshot"]["entity"]
+        self.assert_current(job)
         text = entity["dialogue"] or entity["narration"]
         if not text.strip():
             raise ValueError("本镜没有可配音文本")
         artifact_id = uid("art")
-        job["effective_prompt"] = self.prompt(s, f"按规范中的语言与声线生成配音。文本：\n{text}")
+        job["effective_prompt"] = self.prompt(
+            s, "按规范中的语言与声线生成配音。声音绑定："
+            + json.dumps(s.get("audio_binding", {"voice": s["voice"]}), ensure_ascii=False)
+            + f"\n文本：\n{text}"
+        )
         self.store.save_job(job)
+        if s.get("audio_binding", {}).get("voice_setting", {}).get("source") == "recording":
+            raise ProviderFailure("RECORDED_AUDIO_ONLY", "此角色已选用现有录音或猫叫，请复用或导入音轨，不提交 TTS")
         if s["audio_mode"] == "edge":
             result = await self.providers.engine_request(
                 "/speech", {"text": text, "voice": s["voice"], "output": artifact_id + ".mp3"}
@@ -1066,6 +1158,8 @@ class Workflow:
             result.update(
                 mime="audio/mpeg", route={"provider": "edge-tts", "model": s["voice"], "paid": False}
             )
+        elif s["audio_mode"] == "cloud" and s["audio"]["provider"] == "minimax":
+            result = await self.minimax_audio(job, artifact_id, text)
         elif s["audio_mode"] == "cloud":
             if not s["allow_paid"]:
                 raise ProviderFailure("PAID_DISABLED", "付费配音未启用")
@@ -1121,6 +1215,52 @@ class Workflow:
             raise ValueError("请在设置中启用独立配音")
         self.assert_current(job)
         await self.backup_output(job, self.save_output(job, artifact_id, result))
+
+    async def minimax_audio(self, job, artifact_id, text):
+        s = job["snapshot"]
+        if not s["allow_paid"] or not self.settings.get().allow_paid:
+            raise ProviderFailure("PAID_DISABLED", "请在生成策略中启用允许付费渠道")
+        configured = self.settings.get().audio
+        if configured.provider != "minimax" or configured.base_url != s["audio"]["base_url"]:
+            raise ProviderFailure("AUDIO_NOT_CONFIGURED", "MiniMax 配音配置已变化，请重新创建任务")
+        receipts = self.store.root / "receipts"
+        receipts.mkdir(exist_ok=True, mode=0o700)
+        receipt = receipts / (job["id"] + "-minimax.mp3")
+        if job["runtime"].get("cloud_submitting") and not receipt.exists():
+            raise ProviderFailure("SUBMISSION_UNKNOWN", "MiniMax 配音结果不明，请先核对供应商记录")
+        if not receipt.exists():
+            if not configured.api_key:
+                raise ProviderFailure("AUDIO_NOT_CONFIGURED", "请先在声音设置保存 MiniMax API Key")
+            self.voice_library.require_reusable_voice(s["audio_binding"]["voice_setting"])
+            self.providers.checkpoint(job, cloud_submitting=True, receipt=str(receipt.relative_to(self.store.root)))
+            try:
+                raw, metadata = await minimax_synthesize(
+                    self.providers.client, configured.api_key, s["audio"]["model"], text,
+                    {k: v for k, v in s["audio_binding"]["voice_setting"].items()
+                     if k in {"voice_id", "speed", "pitch", "vol", "emotion"}},
+                )
+            except MiniMaxRejected:
+                self.providers.checkpoint(job, cloud_submitting=False)
+                raise
+            # Save safe provider metadata before the receipt so restart recovery retains it.
+            self.providers.checkpoint(job, minimax_metadata=metadata)
+            temporary = receipt.with_suffix(".tmp")
+            fd = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as file:
+                file.write(raw)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, receipt)
+        self.providers.checkpoint(job, cloud_submitting=False)
+        (self.store.media / (artifact_id + ".mp3")).write_bytes(receipt.read_bytes())
+        metadata = await self.providers.engine_request("/validate", {"file": artifact_id + ".mp3", "kind": "audio"})
+        return {
+            "file": artifact_id + ".mp3", "mime": "audio/mpeg",
+            "metadata": {**metadata, "minimax": job["runtime"].get("minimax_metadata", {}),
+                         "voice_setting": s["audio_binding"]["voice_setting"],
+                         "speaker_id": s["audio_binding"]["speaker_id"]},
+            "route": {"provider": "minimax", "model": s["audio"]["model"], "transport": "cloud", "paid": True},
+        }
 
     async def render(self, job):
         s, episode = job["snapshot"], job["snapshot"]["entity"]

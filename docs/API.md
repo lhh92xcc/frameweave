@@ -1,6 +1,12 @@
 # 工作台接口
 
+MiniMax 配音使用 `audio_mode: "cloud"`、`audio.provider: "minimax"`、`audio.transport: "cloud"`、固定 `audio.base_url: "https://api.minimaxi.com/v1"`，默认模型 `speech-2.8-turbo`。全局 `voice` 和 `speech: {speed, vol, pitch, emotion}` 为未绑定镜头提供默认声线。`audio-cast.voices` 以人物素材 ID 或 `narrator` 为键，值为 `{voice_id, speed?, vol?, pitch?, emotion?}`；`speakers` 将镜头 ID 映射到已配置角色。快照保存生产规范与参考绑定，不包含 Key。音轨与成片按声音配置判断过期；更换 Key 不影响已完成音轨。字段范围及恢复见 [MiniMax](MINIMAX.md)。参数校验只返回字段位置、类型和说明，不回显输入数据。
+
 本机 API 与界面同源于 `http://127.0.0.1:8787`，交互式 Schema 位于 `/docs`。所有修改只允许本地工作台 Origin；密钥为写入型字段，读取配置只返回 `configured`。服务不面向公网多租户部署。
+
+角色 `VoiceProfile` 可带 `library_id`（固定音色库条目 ID）；服务器验证其 `voice_id` 与已锁定原 ID 相同。不一致返回 409，条目缺失返回 404，并停止而不重新设计。资源库只提供读取、已有试听及备份接口；导入已激活记录使用本地维护脚本，不提供远程创建、更新或删除入口。
+
+`VoiceProfile.source: "recording"` 表示此角色仅复用/导入录音，音频生成任务在 TTS 前停止并报 `RECORDED_AUDIO_ONLY`。未设置时沿用已有 TTS 方式；MiniMax 只允许系统目录已知音色和资源库已激活音色，其余在提交前报 `VOICE_POLICY_BLOCKED`。`GET /api/audio/voice-library` 的 `policy` 为只读费用规则；不提供启用新定制音色的开关。免音色费不等于免 TTS 字符费。
 
 | 接口 | 用途 |
 | --- | --- |
@@ -13,6 +19,7 @@
 | `GET /api/projects/{id}/contract.md` | 下载规范 |
 | `PUT /api/projects/{id}/plan` | 编辑已校验计划：`{plan, expected_revision}` |
 | `POST /api/projects/{id}/plan/approve` | 批准分镜版本：`{revision}` |
+| `PUT /api/projects/{id}/audio-cast` | `{voices, speakers, expected_version}`；角色声线及逐镜说话者，修改使相关音轨与成片失效 |
 | `POST /api/projects/{id}/jobs` | 异步步骤：`{stage, entity_id, force, reference_source_id?}`；后者仅用于参考图重生 |
 | `PUT /api/projects/{id}/shots/{shot_id}/references` | 保存逐镜额外已批准素材参考和已批准前镜：`{artifact_ids, previous_shot_id, expected_version}`；改变依赖会使下游失效 |
 | `GET /api/jobs/{id}/image-attempts/{number}` | 读取该任务已生成的候选图，包括尚未完成初检的候选；不代表素材已批准 |
@@ -30,6 +37,10 @@
 | `POST /api/artifacts/{id}/review` | `{approved, note}`；旧版本不可批准 |
 | `PUT /api/artifacts/{id}/reference-role` | 分类当前版本参考图，变更分类后须重新人工审核，已有下游审核失效 |
 | `GET/PUT /api/settings` | 模型渠道、付费开关、声音与字幕 |
+| `GET /api/audio/minimax/voices` | 使用已保存的 Key 读取账号可用音色，不生成语音 |
+| `GET /api/audio/voice-library` | 本地只读、全局已锁定音色库；返回原 ID、参数、激活状态和试听地址，不调用供应商 |
+| `GET /api/audio/voice-library/{id}/preview` | 校验 SHA-256 后播放已保存试听，不生成音频 |
+| `GET /api/audio/voice-library/export.zip` | 私有音色记录、回执、生产来源与试听备份，不含 API Key |
 | `GET /api/gateway/catalog` | 上游当前连接器目录 |
 | `/api/gateway/accounts`、`web-image-providers`、`video-providers` | 受限制的本机账号管理转发 |
 | `GET /api/upstreams` | 上游固定版本 |

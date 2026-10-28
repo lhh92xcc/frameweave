@@ -41,7 +41,10 @@ async function mockStudio(
       return respond({
         text: [],
         image: [],
+        vision: [],
         video: [],
+        image_qc_attempts: 3,
+        image_qc_budget_cny: 0,
         audio: {},
         allow_paid: false,
         audio_mode: "edge",

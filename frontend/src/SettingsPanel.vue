@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import Icon from "./Icon.vue";
 import CloudStoragePanel from "./CloudStoragePanel.vue";
 import { api } from "./api";
+import { emotionOptions, speechDefaults, starterVoices } from "./audio";
 
 type GeminiAccount = {
   id: string;
@@ -28,6 +29,28 @@ const settings = ref<any>(null),
   health = ref<any>({});
 const seedream = ref<any>(null), seedreamKey = ref(""), seedreamError = ref("");
 const savedAllowPaid = ref(false);
+const audioVoices = ref(starterVoices), audioError = ref("");
+function configureAudioProvider(event: Event) {
+  const provider = (event.target as HTMLSelectElement).value;
+  settings.value.audio = provider === "minimax"
+    ? { transport: "cloud", provider, model: "speech-2.8-turbo", base_url: "https://api.minimaxi.com/v1", configured: false }
+    : { transport: "cloud", provider: "compatible", model: "tts-1", base_url: "", configured: false };
+  settings.value.voice = provider === "minimax" ? "cute_boy" : "alloy";
+  settings.value.speech ||= { ...speechDefaults };
+  audioError.value = "";
+}
+async function loadAudioVoices() {
+  audioError.value = "";
+  busy.value = true;
+  try {
+    audioVoices.value = (await api("/audio/minimax/voices")).voices;
+    emit("notify", `已读取 ${audioVoices.value.length} 个 MiniMax 音色，未提交配音。`);
+  } catch (e: any) {
+    audioError.value = e.message;
+  } finally {
+    busy.value = false;
+  }
+}
 const kinds = [
   {
     id: "text",
@@ -98,6 +121,7 @@ async function load() {
       api("/health"),
     ]);
     settings.value = s;
+    settings.value.speech ||= { ...speechDefaults };
     savedAllowPaid.value = s.allow_paid;
     catalog.value = c;
     upstreams.value = u;
@@ -541,9 +565,9 @@ onMounted(load);
               v-model="settings.voice"
               :placeholder="
                 settings.audio_mode === 'cloud'
-                  ? '如 alloy'
+                  ? settings.audio.provider === 'minimax' ? '如 cute_boy' : '如 alloy'
                   : 'zh-CN-XiaoxiaoNeural'
-              " /></label
+              " :list="settings.audio.provider === 'minimax' ? 'minimax-voices' : undefined" /></label
           ><label class="field"
             >字幕<select v-model="settings.subtitles">
               <option :value="true">按镜头时间线生成字幕</option>
@@ -551,13 +575,24 @@ onMounted(load);
             </select></label
           >
         </div>
+        <label v-if="settings.audio_mode === 'cloud'" class="field">
+          配音服务
+          <select :value="settings.audio.provider === 'minimax' ? 'minimax' : 'compatible'" @change="configureAudioProvider">
+            <option value="compatible">兼容云接口</option>
+            <option value="minimax">MiniMax · 短剧配音</option>
+          </select>
+        </label>
         <div v-if="settings.audio_mode === 'cloud'" class="form-grid three">
           <label class="field"
             >配音 API 地址<input
               v-model="settings.audio.base_url"
+              :readonly="settings.audio.provider === 'minimax'"
               placeholder="https://your-provider.example/v1" /></label
           ><label class="field"
-            >配音模型<input v-model="settings.audio.model" /></label
+            >配音模型<select v-if="settings.audio.provider === 'minimax'" v-model="settings.audio.model">
+              <option value="speech-2.8-turbo">speech-2.8-turbo</option>
+              <option value="speech-2.8-hd">speech-2.8-hd</option>
+            </select><input v-else v-model="settings.audio.model" /></label
           ><label class="field"
             >API Key<input
               type="password"
@@ -568,6 +603,19 @@ onMounted(load);
               autocomplete="new-password"
           /></label>
         </div>
+        <template v-if="settings.audio_mode === 'cloud' && settings.audio.provider === 'minimax'">
+          <datalist id="minimax-voices"><option v-for="voice in audioVoices" :key="voice.id" :value="voice.id">{{ voice.name }}</option></datalist>
+          <div class="form-grid three">
+            <label class="field">默认语速<input type="number" min="0.5" max="2" step="0.05" v-model.number="settings.speech.speed" /></label>
+            <label class="field">默认音高<input type="number" min="-12" max="12" step="1" v-model.number="settings.speech.pitch" /></label>
+            <label class="field">默认音量<input type="number" min="0.1" max="10" step="0.1" v-model.number="settings.speech.vol" /></label>
+            <label class="field">默认情绪<select v-model="settings.speech.emotion"><option :value="null">自动判断</option><option v-for="emotion in emotionOptions" :key="emotion.id" :value="emotion.id">{{ emotion.name }}</option></select></label>
+          </div>
+          <button class="btn secondary" :disabled="busy || !settings.audio.configured" @click="loadAudioVoices">读取可用音色 / 检查密钥</button>
+          <p v-if="audioError" class="card-error">{{ audioError }}</p>
+          <p class="muted small">先保存 API Key，再读取账号音色；读取目录不会生成语音。在项目的“角色配音”中为每个角色选声线，并用原台词试音。参考价：Turbo 2 元 / 万计费字符，汉字按 2 个字符计，实际以 MiniMax 用量和账单为准。需要开启允许付费渠道。</p>
+          <p class="muted small"><a href="#assets">固定音色资源库</a>保留已激活音色和试听，可跨项目复用。已禁止新增定制或克隆音色，新角色只选免音色费的系统音色或已有录音；TTS 字符费另计。</p>
+        </template>
         <p class="muted small">
           独立配音需要逐镜审核，音频超出镜头时长时合成会停止。数字人口型、跨语言发音与字幕同步需要人工复核。
         </p>

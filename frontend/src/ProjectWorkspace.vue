@@ -6,6 +6,7 @@ import Icon from "./Icon.vue";
 import MediaDetail from "./MediaDetail.vue";
 import ArtifactSource from "./ArtifactSource.vue";
 import ProjectActivity from "./ProjectActivity.vue";
+import AudioCastPanel from "./AudioCastPanel.vue";
 import {
   api,
   jobErrorMessage,
@@ -55,6 +56,7 @@ const stage = ref("requirements"),
   planJson = ref(""),
   showJson = ref(false),
   sourceOpen = ref(false),
+  voiceCastOpen = ref(false),
   selectedReviewIds = ref<string[]>([]),
   batchNote = ref(""),
   batchError = ref(""),
@@ -419,6 +421,7 @@ async function reviewSelected(approved: boolean) {
         <p class="muted">{{ stageDescription[stage] }}</p>
       </div>
       <div class="button-row">
+        <button v-if="project.plan" class="btn secondary" @click="voiceCastOpen = true"><Icon name="audio" :size="16" />角色配音</button>
         <button class="btn secondary" @click="sourceOpen = true">
           <Icon name="book" :size="16" />原始内容</button
         ><button
@@ -1037,6 +1040,7 @@ async function reviewSelected(approved: boolean) {
       @refresh="props.reload"
       @notify="emit('notify', $event)"
     />
+    <AudioCastPanel v-if="voiceCastOpen" :project="project" :reload="props.reload" @close="voiceCastOpen = false" @settings="voiceCastOpen = false; emit('settings')" @notify="emit('notify', $event)" />
     <div v-if="referenceShot" class="modal-backdrop" @click.self="referenceShot = null">
       <section class="modal edit-modal wide-modal" role="dialog" aria-modal="true" aria-label="配置镜头参考">
         <button class="icon-btn modal-close" aria-label="关闭" @click="referenceShot = null"><Icon name="close" /></button>

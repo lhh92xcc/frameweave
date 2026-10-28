@@ -136,6 +136,7 @@ export interface Project {
   id: string;
   version: number;
   shot_reference_bindings?: Record<string, { artifact_ids: string[]; previous_shot_id: string | null }>;
+  audio_cast?: { voices: Record<string, any>; speakers: Record<string, string> };
   title: string;
   mode: string;
   brief: string;

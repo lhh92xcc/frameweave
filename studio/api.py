@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -22,6 +23,7 @@ from studio.catalog import TEMPLATES
 from studio.cloud_storage import CloudStorageError, CosSettings
 from studio.models import (
     REFERENCE_ROLES,
+    AudioCast,
     ContractEdit,
     PlanEdit,
     ProjectCreate,
@@ -100,6 +102,13 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     async def invalid(request, exc):
         return JSONResponse({"error": {"code": "INVALID_REQUEST", "message": str(exc)}}, status_code=422)
 
+    @app.exception_handler(RequestValidationError)
+    async def schema_invalid(request, exc):
+        # Model-level validation can otherwise echo the entire credential-bearing request.
+        return JSONResponse({"detail": [
+            {key: error[key] for key in ("loc", "msg", "type")} for error in exc.errors()
+        ]}, status_code=422)
+
     @app.exception_handler(ProviderFailure)
     async def provider_error(request, exc):
         return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=503)
@@ -168,6 +177,13 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     @app.post("/api/projects/{project_id}/plan/approve")
     async def approve_plan(project_id: str, body: dict):
         return workflow.approve_plan(project_id, body.get("revision"))
+
+    @app.put("/api/projects/{project_id}/audio-cast")
+    async def audio_cast(project_id: str, body: AudioCast):
+        return workflow.set_audio_cast(
+            project_id, {key: value.model_dump(exclude_none=True) for key, value in body.voices.items()},
+            body.speakers, body.expected_version,
+        )
 
     @app.post("/api/projects/{project_id}/jobs", status_code=202)
     async def generate(project_id: str, body: StageRequest):
@@ -526,6 +542,45 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     @app.get("/api/settings")
     async def get_settings():
         return settings.public(settings.get())
+
+    @app.get("/api/audio/minimax/voices")
+    async def minimax_voices():
+        from studio.minimax import voices
+
+        current = settings.get().audio
+        if current.provider != "minimax":
+            raise ValueError("请先在声音设置中选择 MiniMax 并保存 API Key")
+        result = await voices(providers.client, current.api_key)
+        library = workflow.voice_library
+        library.cache_system_voices(result["voices"])
+        allowed = library.allowed_voice_ids()
+        return {"voices": [v for v in result["voices"] if v["id"] in allowed]}
+
+    @app.get("/api/audio/voice-library")
+    async def voice_library():
+        library = workflow.voice_library
+        return {"voices": [library.public(entry) for entry in library.entries()],
+                "policy": {"customization_allowed": False, "new_casting": "system_voices_only",
+                           "activated_voice_reuse": True, "tts_character_charges": True}}
+
+    @app.get("/api/audio/voice-library/export.zip")
+    async def export_voice_library():
+        exports = store.root / "exports"
+        exports.mkdir(exist_ok=True, mode=0o700)
+        fd, filename = tempfile.mkstemp(suffix=".zip", dir=exports)
+        os.close(fd)
+        path = Path(filename)
+        try:
+            await asyncio.to_thread(workflow.voice_library.export, path)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return FileResponse(path, media_type="application/zip", filename="frameweave-voice-library.zip",
+                            background=BackgroundTask(path.unlink, missing_ok=True))
+
+    @app.get("/api/audio/voice-library/{voice_id}/preview")
+    async def voice_preview(voice_id: str):
+        return FileResponse(workflow.voice_library.preview(voice_id), media_type="audio/mpeg")
 
     @app.put("/api/settings")
     async def save_settings(body: RoutingSettings):

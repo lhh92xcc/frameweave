@@ -45,6 +45,7 @@ class Store:
                 CREATE INDEX IF NOT EXISTS artifact_entity ON artifacts(project_id,json_extract(data, '$.kind'),json_extract(data, '$.entity_id'));
                 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, created REAL NOT NULL, message TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS event_job ON events(job_id, id);
+                CREATE TABLE IF NOT EXISTS voice_library(id TEXT PRIMARY KEY, voice_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
             """)
         os.chmod(self.path, 0o600)
 

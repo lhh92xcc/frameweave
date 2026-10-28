@@ -110,6 +110,25 @@ class Route(StrictModel):
         return value.rstrip("/")
 
 
+class SpeechControls(StrictModel):
+    speed: float = Field(default=1, ge=0.5, le=2, allow_inf_nan=False)
+    vol: float = Field(default=1, gt=0, le=10, allow_inf_nan=False)
+    pitch: int = Field(default=0, ge=-12, le=12)
+    emotion: Literal["happy", "sad", "angry", "fearful", "disgusted", "surprised", "calm"] | None = None
+
+
+class VoiceProfile(SpeechControls):
+    voice_id: str = Field(min_length=1, max_length=160)
+    library_id: str | None = Field(default=None, pattern=r"^voice_[a-f0-9]{20}$")
+    source: Literal["recording"] | None = None
+
+
+class AudioCast(StrictModel):
+    voices: dict[str, VoiceProfile] = Field(default_factory=dict, max_length=120)
+    speakers: dict[str, str] = Field(default_factory=dict, max_length=6000)
+    expected_version: int = Field(ge=0)
+
+
 class RoutingSettings(StrictModel):
     allow_paid: bool = False
     text: list[Route] = Field(default_factory=lambda: [Route()], min_length=1, max_length=6)
@@ -127,7 +146,19 @@ class RoutingSettings(StrictModel):
     voice: str = Field(default="zh-CN-XiaoxiaoNeural", min_length=1, max_length=160)
     audio_mode: Literal["native", "edge", "cloud", "silent"] = "native"
     audio: Route = Field(default_factory=lambda: Route(transport="cloud", model="tts-1"))
+    speech: SpeechControls = Field(default_factory=SpeechControls)
+    audio_revision: int = Field(default=0, ge=0)
     subtitles: bool = True
+
+    @model_validator(mode="after")
+    def minimax_origin(self):
+        if self.audio.provider == "minimax" and (
+            self.audio.transport != "cloud"
+            or self.audio.base_url != "https://api.minimaxi.com/v1"
+            or self.audio.model not in {"speech-2.8-turbo", "speech-2.8-hd"}
+        ):
+            raise ValueError("MiniMax 配音须使用官方地址 https://api.minimaxi.com/v1 和 speech-2.8 模型")
+        return self
 
 
 class StageRequest(StrictModel):
