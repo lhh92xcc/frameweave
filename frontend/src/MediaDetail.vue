@@ -16,11 +16,11 @@ const mediaKind = computed(() => props.artifact.mime.split("/")[0]);
 async function review(approved: boolean) {
   busy.value = true;
   try {
-    await api("/artifacts/" + props.artifact.id + "/review", "POST", {
+    const result = await api<Artifact>("/artifacts/" + props.artifact.id + "/review", "POST", {
       approved,
       note: note.value,
     });
-    emit("notify", approved ? "已批准，可进入下一步" : "已标记为需返工");
+    emit("notify", approved ? "已批准，可进入下一步" : result.rework_job_id ? "已自动安排返工，将按审核意见修正并重新质检" : result.rework_blocked ? `需返工，自动处理暂停：${result.rework_blocked}` : "已标记为需返工");
     emit("refresh");
     emit("close");
   } catch (e: any) {
@@ -207,8 +207,9 @@ async function prompt() {
           {{ artifact.metadata.duration_warning }}
         </div>
         <details v-if="artifact.metadata?.visual_qc">
-          <summary>自动视觉初检：第 {{ artifact.metadata.visual_qc.attempt }} 次通过（仍需人工审核）</summary>
+          <summary>自动视觉质检：第 {{ artifact.metadata.visual_qc.total_attempts || artifact.metadata.visual_qc.attempt }} 次通过（{{ artifact.review_method === 'automatic_visual_qc' ? '已自动批准，可人工复核' : '母版待人工确认' }}）</summary>
           <pre class="prompt-code">{{ JSON.stringify(artifact.metadata.visual_qc.checks, null, 2) }}</pre>
+          <pre v-if="artifact.metadata.visual_qc.asset_checks" class="prompt-code">{{ JSON.stringify(artifact.metadata.visual_qc.asset_checks, null, 2) }}</pre>
         </details>
         <p v-if="artifact.metadata?.reference_role" class="muted small">参考图分类：{{ artifact.metadata.reference_role }}</p>
         <p class="muted small">

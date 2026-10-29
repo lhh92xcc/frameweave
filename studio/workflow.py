@@ -14,8 +14,9 @@ from studio.catalog import baseline_contract
 from studio.cloud_storage import CloudStorageError, CosStorage
 from studio.minimax import MiniMaxRejected
 from studio.minimax import synthesize as minimax_synthesize
-from studio.models import Asset, ProductionPlan, ProjectCreate, Shot
+from studio.models import REFERENCE_ROLES, Asset, ProductionPlan, ProjectCreate, Shot
 from studio.providers import ProviderFailure, requires_verification
+from studio.reference_policy import ReferenceGuard, prepare_reference_images, read_policy, validate_plan
 from studio.store import Conflict, digest, now, uid
 from studio.voice_library import VoiceLibrary
 
@@ -53,10 +54,14 @@ class VisualCheck(BaseModel):
 
 class VisualQC(BaseModel):
     checks: dict[str, VisualCheck]
+    asset_checks: dict[str, dict[str, VisualCheck]]
     correction: str = Field(default="", max_length=3000)
 
 
-QC_CHECKS = {"identity", "costume", "location", "props", "spatial_sides", "continuity", "composition", "story"}
+QC_CHECKS = {"identity", "costume", "location", "props", "spatial_sides", "continuity", "composition", "story",
+             "contract", "asset_coverage"}
+ASSET_CHECKS = {"identity", "appearance", "state", "spatial"}
+CONSISTENCY_VERSION = 1
 
 
 class Workflow:
@@ -91,6 +96,7 @@ class Workflow:
         return self.store.save_project(project)
 
     def update_contract(self, project_id, markdown, revision):
+        read_policy(markdown)
         p = self.store.project(project_id)
         if p["contract"]["revision"] != revision:
             raise Conflict("规范已被修改，请刷新后重试")
@@ -104,6 +110,7 @@ class Workflow:
             "approved": False,
         }
         p["plan_approved"] = False
+        p.pop("reference_masters", None)
         return self.store.save_project(p, p["version"])
 
     def approve_contract(self, project_id, expected_hash):
@@ -167,7 +174,7 @@ class Workflow:
         if check_dependencies and kind not in {"reference", "audio"}:
             try:
                 expected = self.dependencies(p, kind, entity_id)
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, CloudStorageError):
                 return None
             if candidate["dependencies"] != expected:
                 return None
@@ -240,8 +247,9 @@ class Workflow:
         if stage in {"requirements", "plan", "reference", "audio"}:
             return []
         entity = self.entity(p, stage, entity_id)
+        guard = ReferenceGuard(self, p)
         if stage == "keyframe":
-            requested = [("reference", id_) for id_ in entity["asset_ids"]]
+            requested = [] if guard.policy else [("reference", id_) for id_ in entity["asset_ids"]]
         elif stage == "video":
             requested = [("keyframe", entity_id)]
         else:
@@ -249,6 +257,11 @@ class Workflow:
             if self.settings.get().audio_mode in {"edge", "cloud"}:
                 requested += [("audio", s["id"]) for s in entity["shots"] if s["narration"] or s["dialogue"]]
         result = []
+        if stage == "keyframe" and guard.policy:
+            if guard.explicit:
+                validate_plan(guard.policy, p["plan"])
+            for id_ in entity["asset_ids"]:
+                result.extend(guard.shot_references(id_))
         for kind, id_ in requested:
             artifact = self.latest(p, kind, id_)
             if not artifact or (require_approved and artifact["review"] != "approved"):
@@ -268,11 +281,21 @@ class Workflow:
                     or artifact["review"] != "approved"
                 ):
                     raise ValueError("额外参考图不属于当前已批准的绑定素材，请重新选择")
+                if guard.policy:
+                    role = artifact.get("metadata", {}).get("reference_role", "general")
+                    if ((guard.explicit and guard.views(artifact["entity_id"]).get(role, {}).get("id") != artifact_id)
+                            or not guard.approved(artifact, guard.master(artifact["entity_id"]))):
+                        raise ValueError("额外参考图必须继承当前母版且为该视角的当前已批准版本")
                 for source_id in artifact.get("dependencies", []):
                     self.reference_source(p, artifact["entity_id"], source_id)
                 if artifact_id not in result:
                     result.append(artifact_id)
             previous_id = binding.get("previous_shot_id")
+            if guard.policy:
+                required_previous = guard.previous_shot(entity_id)
+                if previous_id and previous_id != required_previous:
+                    raise ValueError("连续镜头必须承接同集紧邻的上一镜，不能跨集或跳过镜头")
+                previous_id = required_previous
             if previous_id:
                 shots = self.shots(p)
                 positions = {shot["id"]: index for index, shot in enumerate(shots)}
@@ -282,6 +305,8 @@ class Workflow:
                 if not previous or previous["review"] != "approved":
                     raise ValueError("连续性参考关键帧尚未批准或已过期")
                 result.append(previous["id"])
+            if guard.policy and guard.attachment_count(result) > guard.policy.max_references:
+                raise ValueError("实际参考图超出强制上限；请拆镜或调整机位，禁止静默丢弃参考图")
         return result
 
     def set_shot_references(self, project_id, shot_id, artifact_ids, previous_shot_id, expected_version):
@@ -302,6 +327,9 @@ class Workflow:
         return p
 
     def reference_source(self, p, entity_id, source_id=None):
+        guard = ReferenceGuard(self, p)
+        if guard.policy:
+            return guard.master(entity_id, source_id)
         if source_id:
             source = self.store.artifact(source_id)
         else:
@@ -338,8 +366,12 @@ class Workflow:
             raise ValueError("参考原图尚未批准，请先审核原图后再生成")
         return source
 
-    def snapshot(self, p, stage, entity_id, *, allow_unapproved_reference=False, reference_source_id=None):
+    def snapshot(self, p, stage, entity_id, *, allow_unapproved_reference=False, reference_source_id=None,
+                 reference_role=None):
         reference_upload = allow_unapproved_reference and stage == "reference"
+        guard = ReferenceGuard(self, p)
+        if reference_role and stage != "reference":
+            raise ValueError("只有素材参考图可以指定生成视角")
         if reference_source_id and (stage != "reference" or reference_upload):
             raise ValueError("仅素材参考图生成可以指定参考原图")
         if reference_upload and (not p.get("plan") or p.get("plan_contract_hash") != p["contract"]["hash"]):
@@ -400,21 +432,68 @@ class Workflow:
                     asset["kind"] for asset in p["plan"]["assets"]
                     if asset["id"] in result["entity"]["asset_ids"]
                 })
-        if stage == "reference" and not reference_upload:
-            source = self.reference_source(p, entity_id, reference_source_id)
+            if stage in {"reference", "keyframe"}:
+                ids = {entity_id} if stage == "reference" else set(result["entity"]["asset_ids"])
+                result["consistency_version"] = CONSISTENCY_VERSION
+                result["qc_assets"] = [asset.copy() for asset in p["plan"]["assets"] if asset["id"] in ids]
+                result["project_asset_catalog"] = p["plan"]["assets"]
+        if stage == "reference" and reference_role and reference_role not in REFERENCE_ROLES[result["entity"]["kind"]]:
+            raise ValueError("参考图视角与素材类型不匹配")
+        if stage == "reference" and (not reference_upload or guard.policy):
+            if guard.explicit:
+                validate_plan(guard.policy, p["plan"])
+                if reference_upload and reference_role not in guard.policy.assets[entity_id].required_roles:
+                    raise ValueError("请上传规范要求的参考视角，不能用标准参考替代必备视角")
+            if guard.policy and not reference_upload:
+                reference_role = guard.target_role(entity_id, reference_role)
+            master_upload = bool(reference_upload and (
+                (guard.explicit and reference_role == guard.policy.assets[entity_id].required_roles[0])
+                or (not guard.explicit and (reference_role == "general" or not guard.canonical(entity_id)))
+            ))
+            bootstrap = bool(not reference_upload and not guard.explicit
+                             and not p.get("reference_masters", {}).get(entity_id)
+                             and (not guard.canonical(entity_id) or guard.canonical(entity_id)["review"] == "rejected"))
+            source = None if master_upload or bootstrap else self.reference_source(p, entity_id, reference_source_id)
+            if bootstrap and reference_source_id:
+                raise ValueError("指定原图不可用，请先批准母版")
+            result["canonical_bootstrap"] = bootstrap
             current = self.latest(p, "reference", entity_id)
+            if guard.explicit:
+                current = guard.views(entity_id).get(reference_role)
             result["dependencies"] = [source["id"]] if source else []
             result["reference_base_id"] = current["id"] if current else None
+        if stage == "reference" and reference_role:
+            result["reference_role"] = reference_role
+        if guard.policy and stage in {"reference", "keyframe", "video"}:
+            from studio.archive_import import sha256
+
+            result["reference_policy"] = guard.policy.model_dump()
+            result["reference_policy_mode"] = "explicit" if guard.explicit else "automatic"
+            result["reference_manifest"] = []
+            for id_ in result["dependencies"]:
+                artifact = self.store.artifact(id_)
+                with self.cloud.materialize(self.store, artifact) as path:
+                    checksum = sha256(path)
+                result["reference_manifest"].append({
+                    "artifact_id": id_, "entity_id": artifact["entity_id"],
+                    "role": artifact.get("metadata", {}).get("reference_role", "general"), "sha256": checksum,
+                })
         result["dependency_versions"] = self.dependency_versions(result["dependencies"])
         return result
 
-    def enqueue(self, project_id, stage, entity_id="", force=False, retry_of=None, reference_source_id=None):
+    def enqueue(self, project_id, stage, entity_id="", force=False, retry_of=None, reference_source_id=None,
+                reference_role=None, rework=None):
         p = self.store.project(project_id)
+        snapshot = self.snapshot(p, stage, entity_id, reference_source_id=reference_source_id, reference_role=reference_role)
+        if rework is None and retry_of:
+            rework = retry_of["snapshot"].get("rework")
+        if rework:
+            snapshot["rework"] = rework
         job = self.store.enqueue(
             project_id,
             stage,
             entity_id,
-            self.snapshot(p, stage, entity_id, reference_source_id=reference_source_id),
+            snapshot,
             force,
             retry_of,
         )
@@ -423,6 +502,7 @@ class Workflow:
 
     def check_plan(self, p, plan):
         value = ProductionPlan.model_validate(plan).model_dump()
+        validate_plan(read_policy(p["contract"]["markdown"]), value)
         if len(value["episodes"]) != p["episodes_count"]:
             raise ValueError("分集数量必须与项目要求一致")
         chapter_ids = {c["chapter_number"] for c in p["chapters"]}
@@ -444,19 +524,23 @@ class Workflow:
         p["plan"] = self.check_plan(p, plan)
         p["plan_revision"] += 1
         p["shot_reference_bindings"] = {}
+        p.pop("reference_masters", None)
         p.pop("audio_cast", None)
         p.pop("audio_cast_versions", None)
         p["plan_approved"] = False
         p["plan_contract_hash"] = p["contract"]["hash"]
         return self.store.save_project(p, p["version"])
 
-    def approve_plan(self, project_id, revision):
+    def approve_plan(self, project_id, revision, contract_hash=None):
         p = self.store.project(project_id)
-        if not p["contract"]["approved"] or p.get("plan_contract_hash") != p["contract"]["hash"]:
+        if not p["contract"]["approved"] or (
+            p.get("plan_contract_hash") != p["contract"]["hash"] and contract_hash != p["contract"]["hash"]
+        ):
             raise ValueError("当前分镜未基于已批准的规范生成，请重新生成")
         if p["plan_revision"] != revision or not p["plan"]:
             raise Conflict("分镜版本已变化，请刷新后重试")
         self.check_plan(p, p["plan"])
+        p["plan_contract_hash"] = p["contract"]["hash"]
         p["plan_approved"] = True
         self.store.save_project(p, p["version"])
         self.wake.set()
@@ -467,6 +551,9 @@ class Workflow:
         if a.get("archived"):
             raise ValueError("历史素材保留原审核记录；请先导入到当前分镜，再审核其制作用途")
         p = self.store.project(a["project_id"])
+        guard = ReferenceGuard(self, p)
+        if guard.policy and a["kind"] == "reference" and not guard.current(a):
+            raise Conflict("参考视角或其母版已变化，请按当前母版重新导入或生成")
         current = self.latest(p, a["kind"], a["entity_id"])
         if not current or current["id"] != artifact_id:
             reusable_reference = (
@@ -489,12 +576,67 @@ class Workflow:
             return a
         a.update(review="approved" if approved else "rejected", review_note=note, reviewed_at=now())
         a["review_version"] = a.get("review_version", 0) + 1
+        if approved:
+            a["approved_once"] = True
         self.store.save_artifact(a)
+        guard = ReferenceGuard(self, p)
+        if approved and a["kind"] == "reference" and not guard.explicit and not a.get("dependencies"):
+            masters = p.setdefault("reference_masters", {})
+            if not masters.get(a["entity_id"]):
+                masters[a["entity_id"]] = a["id"]
+                self.store.save_project(p, p["version"])
+        if not approved and a["kind"] in {"reference", "keyframe"}:
+            self.schedule_image_rework(a)
         self.wake.set()
         return a
 
+    def schedule_image_rework(self, artifact):
+        """A human rejection uses the same bounded generation and budget chain."""
+        try:
+            original = self.store.job(artifact["job_id"])
+            prior = original.get("snapshot", {}).get("rework", {})
+            qc = artifact.get("metadata", {}).get("visual_qc", {})
+            history = [*prior.get("notes", []), artifact.get("review_note") or "人工复核未通过，请重新检查全部要求"]
+            rework = {
+                "artifact_id": artifact["id"], "review_version": artifact.get("review_version", 0),
+                "notes": history, "attempts_used": qc.get("total_attempts", 0),
+                "cost_reservations": original.get("runtime", {}).get("qc_cost_reservations", {}),
+            }
+            job = self.enqueue(artifact["project_id"], artifact["kind"], artifact["entity_id"], force=True,
+                               reference_role=artifact.get("metadata", {}).get("reference_role"), rework=rework)
+            artifact["rework_job_id"] = job["id"]
+            artifact.pop("rework_blocked", None)
+        except (ValueError, KeyError, Conflict, CloudStorageError) as exc:
+            artifact["rework_blocked"] = str(exc)
+        self.store.save_artifact(artifact)
+
+    def bind_master(self, project_id, entity_id, artifact_id, expected_version):
+        p = self.store.project(project_id)
+        if expected_version != p["version"]:
+            raise Conflict("项目已更新，请刷新后重试")
+        guard = ReferenceGuard(self, p)
+        if not p["contract"]["approved"] or not p["plan_approved"]:
+            raise ValueError("请先批准当前规范和分镜")
+        self.entity(p, "reference", entity_id)
+        if guard.explicit:
+            raise ValueError("当前规范指定了母版视角，请按规范上传并批准该视角")
+        a = self.store.artifact(artifact_id)
+        if (a["project_id"] != project_id or a["entity_id"] != entity_id or a["kind"] != "reference"
+                or a.get("dependencies") or a.get("archived") or a["review"] != "approved"
+                or a["contract_hash"] != p["contract"]["hash"] or a["plan_revision"] != p["plan_revision"]):
+            raise ValueError("母版必须为当前项目已批准的独立原图，不能用派生图重定身份")
+        if guard.canonical(entity_id) and guard.canonical(entity_id)["id"] == artifact_id:
+            return p
+        a["review_version"] = a.get("review_version", 0) + 1
+        self.store.save_artifact(a)
+        p.setdefault("reference_masters", {})[entity_id] = artifact_id
+        self.store.save_project(p, expected_version)
+        self.wake.set()
+        return p
+
     def project_view(self, p, include_source=True):
         result = p.copy()
+        result["reference_readiness"] = ReferenceGuard(self, p).status()
         if not include_source:
             result.pop("source", None)
             result.pop("chapters", None)
@@ -503,6 +645,9 @@ class Workflow:
         for a in artifacts:
             current = None if a.get("archived") else self.latest(p, a["kind"], a["entity_id"])
             a["stale"] = False if a.get("archived") else not current or current["id"] != a["id"]
+            if a["kind"] == "reference" and not a.get("archived") and result["reference_readiness"]:
+                guard = ReferenceGuard(self, p)
+                a["stale"] = not guard.current(a)
             a["url"] = "/api/artifacts/" + a["id"] + "/content"
             if a.get("thumbnail"):
                 a["thumbnail_url"] = "/api/artifacts/" + a["id"] + "/thumbnail"
@@ -601,8 +746,36 @@ class Workflow:
             collections.append(("audio", [s for s in self.shots(p) if s["narration"] or s["dialogue"]]))
         collections.append(("render", p["plan"]["episodes"]))
         for kind, entities in collections:
+            if kind == "reference":
+                guard = ReferenceGuard(self, p)
+                if guard.policy:
+                    readiness = guard.status()
+                    if any(not view["approved"] for asset in readiness["assets"].values() for view in asset["views"]):
+                        if any(guard.views(id_).get(view["role"], {}).get("review") == "rejected"
+                               for id_, asset in readiness["assets"].items() for view in asset["views"]):
+                            return {"state": "rework", "stage": "reference"}
+                        if not guard.explicit:
+                            missing = [id_ for id_, asset in readiness["assets"].items()
+                                       if not asset["views"][0]["artifact_id"] and not guard.has_previous_reference(id_)]
+                            if missing:
+                                return schedule("reference", missing)
+                        else:
+                            missing = []
+                            for id_, asset in readiness["assets"].items():
+                                if not asset["views"][0]["approved"]:
+                                    continue
+                                view = next((view for view in asset["views"][1:] if not view["approved"]), None)
+                                candidate = guard.views(id_).get(view["role"]) if view else None
+                                if view and (not candidate or not guard.current(candidate)):
+                                    missing.append(id_)
+                            if missing:
+                                return schedule("reference", missing)
+                        return {"state": "review", "stage": "reference"}
+                    continue
             pending = [e for e in entities if not self.latest(p, kind, e["id"])]
             if pending:
+                if kind == "keyframe":
+                    pending = pending[:1]
                 return schedule(kind, [entity["id"] for entity in pending])
             if any(self.latest(p, kind, e["id"])["review"] == "rejected" for e in entities):
                 return {"state": "rework", "stage": kind}
@@ -827,7 +1000,9 @@ class Workflow:
             if current_job["status"] == "cancelled":
                 return
             job.update(status="succeeded", finished_at=now(), error=None)
-            self.store.event(job["id"], "已生成；等待人工审核")
+            artifact = self.store.artifact(job["artifact_id"]) if job.get("artifact_id") else None
+            self.store.event(job["id"], "逐资产质检通过，已自动批准" if artifact and artifact.get("review_method") == "automatic_visual_qc"
+                             else "已生成；等待人工审核")
         except asyncio.CancelledError:
             if self.stopping:
                 # Keep remote ID for resumption on next startup.
@@ -899,6 +1074,7 @@ class Workflow:
             plan_approved=False,
             plan_contract_hash=s["contract_hash"],
         )
+        current.pop("reference_masters", None)
         self.store.save_project(current, current["version"])
 
     def assert_current(self, job, p=None, allow_cancelled_job=False):
@@ -906,22 +1082,40 @@ class Workflow:
         if (self.store.job(job["id"])["status"] == "cancelled" and not allow_cancelled_job) or p["cancelled"]:
             raise ProviderFailure("CANCELLED", "任务已取消；已接收的结果保留在上游")
         s = job["snapshot"]
+        if p["paused"]:
+            raise ProviderFailure("PROJECT_PAUSED", "项目已暂停，停止继续生成")
         if p["contract"]["hash"] != s["contract_hash"] or p["plan_revision"] != s["plan_revision"]:
             raise ProviderFailure("STALE_INPUT", "规范或分镜已变化；旧请求不能覆盖当前版本")
         if job["stage"] != "requirements" and not p["contract"]["approved"]:
             raise ProviderFailure("STALE_INPUT", "制作规范未批准，不能继续生成")
         if job["stage"] not in {"requirements", "plan"} and not p["plan_approved"]:
             raise ProviderFailure("STALE_INPUT", "分镜未批准，不能继续生成")
+        if job["stage"] in {"reference", "keyframe"} and s.get("consistency_version") != CONSISTENCY_VERSION:
+            raise ProviderFailure("CONSISTENCY_UPGRADE_REQUIRED", "旧图片任务缺少逐资产检查，请按当前规范重新创建任务")
+        rework = s.get("rework")
+        if rework:
+            rejected = self.store.artifact(rework["artifact_id"])
+            if rejected["review"] != "rejected" or rejected.get("review_version", 0) != rework["review_version"]:
+                raise ProviderFailure("STALE_INPUT", "返工依据已变化，停止旧返工任务")
         if job["stage"] in {"audio", "render"} and s.get("audio_fingerprint"):
             if s["audio_fingerprint"] != self.audio_fingerprint(p, job["stage"], job["entity_id"]):
                 raise ProviderFailure("STALE_INPUT", "配音方式、角色声线或声音参数已变化，请创建新任务")
         if job["stage"] == "reference" and "reference_base_id" in s:
+            guard = ReferenceGuard(self, p)
+            if (not s["dependencies"] and not s.get("canonical_bootstrap")
+                    and s.get("reference_policy_mode") == "automatic"):
+                raise ProviderFailure("STALE_DEPENDENCY", "缺少已锁定母版，不能降级为文字生图")
+            if s.get("canonical_bootstrap") and (p.get("reference_masters", {}).get(job["entity_id"])
+                                                  or (guard.canonical(job["entity_id"]) or {}).get("review") == "approved"):
+                raise ProviderFailure("STALE_DEPENDENCY", "母版已确认，旧定妆请求不能覆盖锁定身份")
             try:
                 for source_id in s["dependencies"]:
                     self.reference_source(p, job["entity_id"], source_id)
             except (ValueError, KeyError) as exc:
                 raise ProviderFailure("STALE_DEPENDENCY", "参考原图或审核状态已变化，请重新创建任务") from exc
             current = self.latest(p, "reference", job["entity_id"])
+            if s.get("reference_policy_mode") == "explicit":
+                current = ReferenceGuard(self, p).views(job["entity_id"]).get(s.get("reference_role"))
             if (current["id"] if current else None) != s["reference_base_id"]:
                 raise ProviderFailure("STALE_DEPENDENCY", "当前素材已变化，请重新创建任务")
         elif job["stage"] == "reference":
@@ -939,6 +1133,18 @@ class Workflow:
                 raise ProviderFailure("STALE_DEPENDENCY", "依赖素材的审核或分类已变化，请重新创建任务")
         except KeyError as exc:
             raise ProviderFailure("STALE_DEPENDENCY", "依赖素材已不存在，请重新创建任务") from exc
+        if s.get("reference_policy"):
+            from studio.archive_import import sha256
+
+            manifest = s.get("reference_manifest", [])
+            if ReferenceGuard(self, p).policy.model_dump() != s["reference_policy"]:
+                raise ProviderFailure("STALE_DEPENDENCY", "参考规则已变化，请重新创建任务")
+            if [entry["artifact_id"] for entry in manifest] != s["dependencies"]:
+                raise ProviderFailure("STALE_DEPENDENCY", "实际参考文件清单不完整，禁止提交")
+            for entry in manifest:
+                with self.cloud.materialize(self.store, self.store.artifact(entry["artifact_id"])) as path:
+                    if sha256(path) != entry["sha256"]:
+                        raise ProviderFailure("STALE_DEPENDENCY", "参考文件内容已变化，禁止提交旧参考")
 
     async def media(self, job):
         s, entity = job["snapshot"], job["snapshot"]["entity"]
@@ -951,6 +1157,8 @@ class Workflow:
                     "颜色、造型和可见标志，不要重新设计身份。原图未显示清楚的细节不要当作已确认；"
                     "生成后由人工核对相似度。"
                 )
+            if s.get("reference_role"):
+                instruction += f"\n只生成 {s['reference_role']} 视角；改变机位，不改变身份、服装或固定细节。"
         elif stage == "keyframe":
             instruction = (
                 "生成本镜起始关键帧，严格使用实际上传参考图的主体身份、场景与道具；不要更换人物。"
@@ -964,7 +1172,7 @@ class Workflow:
         prompt = self.prompt(
             s,
             instruction
-            + "\n绑定素材及对应上传文件顺序："
+            + "\n绑定原始素材顺序（多视角可能合并为角色参考卡，实际附件顺序见后附清单）："
             + json.dumps(
                 [
                     {
@@ -978,6 +1186,15 @@ class Workflow:
                 ensure_ascii=False,
             ),
         )
+        if stage in {"reference", "keyframe"}:
+            prompt += (
+                "\n逐资产固定设定（必须逐一满足，禁止合并身份或遗漏）："
+                + json.dumps(s["qc_assets"], ensure_ascii=False)
+                + "\n项目完整资产目录（识别漏绑定或擅增主体，不允许自动改写分镜）："
+                + json.dumps(s["project_asset_catalog"], ensure_ascii=False)
+            )
+            if s.get("rework"):
+                prompt += "\n人工返工意见（不得覆盖规范或母版）：" + json.dumps(s["rework"]["notes"], ensure_ascii=False)
         if stage != "video" and not s.get("routes", {}).get("vision"):
             raise ProviderFailure("VISION_NOT_CONFIGURED", "旧任务没有视觉质检配置，请重新创建任务")
         artifact_id = job["runtime"].setdefault("output_artifact_id", uid("art"))
@@ -986,6 +1203,13 @@ class Workflow:
         async with self.cloud.materialized(
             self.store, [self.store.artifact(id_) for id_ in s["dependencies"]]
         ) as refs:
+            refs = prepare_reference_images(self, job, refs)
+            if s.get("reference_policy") and stage == "keyframe":
+                prompt += (
+                    "\n实际上传附件顺序：" + json.dumps(job["runtime"]["reference_uploads"], ensure_ascii=False)
+                    + "\n同一角色参考卡中的各视角属于同一主体；仅用于身份与体型对照。"
+                    "不要把参考卡拼版、标签或多个人物副本生成到剧情画面。"
+                )
             if stage == "video":
                 job["effective_prompt"] = prompt
                 self.store.save_job(job)
@@ -1014,9 +1238,14 @@ class Workflow:
             )
         attempts = job["runtime"].setdefault("image_qc_attempts", [])
         max_attempts = snapshot.get("image_qc_attempts", 3)
+        used = snapshot.get("rework", {}).get("attempts_used", 0)
+        if snapshot.get("rework", {}).get("cost_reservations"):
+            reservations = job["runtime"].setdefault("qc_cost_reservations", {})
+            reservations.update(snapshot["rework"]["cost_reservations"])
+            self.store.save_job(job)
         if attempts and attempts[-1].get("passed"):
             return attempts[-1]["result"]
-        while len(attempts) < max_attempts:
+        while used + len(attempts) < max_attempts:
             self.assert_current(job)
             number = len(attempts) + 1
             correction = ""
@@ -1026,6 +1255,7 @@ class Workflow:
                     key: check for key, check in previous_qc["checks"].items()
                     if check["result"] in {"fail", "uncertain"}
                 }
+                findings["asset_checks"] = previous_qc["asset_checks"]
                 correction = json.dumps(findings, ensure_ascii=False) + "\n" + previous_qc["correction"]
             prompt = base_prompt + f"\n图片生成尝试 {number}。"
             if correction:
@@ -1035,7 +1265,7 @@ class Workflow:
                 )
             job["effective_prompt"] = prompt
             self.store.save_job(job)
-            self.store.event(job["id"], f"图片第 {number}/{max_attempts} 次生成")
+            self.store.event(job["id"], f"图片第 {used + number}/{max_attempts} 次生成")
             result = await self.providers.generate(
                 "image", job, prompt, refs, aspect_ratio=snapshot["aspect_ratio"], output=f"{artifact_id}_{number}"
             )
@@ -1047,8 +1277,14 @@ class Workflow:
                 base_prompt + "\n\n你是严格的视觉质检员。按图片上传顺序，最后一张是待检候选，其余是已批准参考图。"
                 "对照规范、绑定和镜头要求逐项检查。不能确认时标 uncertain，不适用须说明依据。"
                 "只返回 JSON 对象：checks 必须包含 identity、costume、location、props、continuity、"
-                "spatial_sides（左右、持物手和空间关系）、composition、story 八项，每项包含 "
+                "spatial_sides（左右、持物手和空间关系）、composition、story、contract（完整规范逐条核对）、"
+                "asset_coverage（核对剧情和目录，发现漏绑定、额外或遗漏的主体必须 fail）十项，每项包含 "
                 "result（pass、fail、uncertain、not_applicable）和 finding；"
+                "另返回 asset_checks，以逐资产固定设定中的每个资产 ID 为键，必须精确覆盖，不得漏项或增加 ID。"
+                "每个资产包含 identity、appearance、state、spatial 四项，结构同上述 result 和 finding。"
+                "这四项必须明确 pass、fail 或 uncertain，不得用 not_applicable 跳过；"
+                "只核验本镜应呈现的特征，合理遮挡或画外细节应说明依据；应呈现的特征无法确认时用 uncertain。"
+                "state 按本镜剧情允许的状态变化核对，固定身份和外观以母版及规范为准。"
                 "correction 为针对失败或不确定项的具体画面修正，不得修改已批准规范。"
             )
             if job["runtime"].get("qc_retry_nonce"):
@@ -1062,7 +1298,13 @@ class Workflow:
                 qc = VisualQC.model_validate_json(raw)
                 if set(qc.checks) != QC_CHECKS:
                     raise ValueError("missing checks")
-                required = {"composition"}
+                asset_ids = {asset["id"] for asset in snapshot["qc_assets"]}
+                if set(qc.asset_checks) != asset_ids or any(
+                    set(checks) != ASSET_CHECKS or any(check.result == "not_applicable" for check in checks.values())
+                    for checks in qc.asset_checks.values()
+                ):
+                    raise ValueError("missing per-asset checks")
+                required = {"composition", "contract", "asset_coverage"}
                 if job["stage"] == "keyframe":
                     required.update({"story", "spatial_sides"})
                 kinds = set(snapshot.get("bound_asset_kinds", []))
@@ -1078,7 +1320,8 @@ class Workflow:
                     required.add("continuity")
                 if any(qc.checks[key].result == "not_applicable" for key in required):
                     raise ValueError("required checks cannot be marked not applicable")
-                passed = all(check.result in {"pass", "not_applicable"} for check in qc.checks.values())
+                passed = (all(check.result in {"pass", "not_applicable"} for check in qc.checks.values())
+                          and all(check.result == "pass" for checks in qc.asset_checks.values() for check in checks.values()))
                 if result["metadata"].get("aspect_matches") is False:
                     qc.checks["composition"] = VisualCheck(result="fail", finding="图片比例不符合项目要求")
                     qc.correction += f"\n输出必须符合 {snapshot['aspect_ratio']} 画幅比例。"
@@ -1088,7 +1331,10 @@ class Workflow:
             except (ValidationError, ValueError, KeyError, IndexError) as exc:
                 raise ProviderFailure("VISION_INVALID", "视觉质检结果不完整，已暂停；不会把候选图送入人工审核") from exc
             if passed:
-                result["metadata"]["visual_qc"] = {"attempt": number, **qc.model_dump(), "route": response.get("route")}
+                result["metadata"]["visual_qc"] = {
+                    "attempt": number, "total_attempts": used + number, "version": CONSISTENCY_VERSION,
+                    **qc.model_dump(), "route": response.get("route"),
+                }
             record = {
                 "attempt": number, "prompt": prompt, "result": result,
                 "qc": qc.model_dump(), "qc_route": response.get("route"), "passed": passed,
@@ -1097,7 +1343,7 @@ class Workflow:
             job["runtime"].pop("pending_qc_image", None)
             self.store.save_job(job)
             if passed:
-                self.store.event(job["id"], "自动视觉质检通过，等待人工审核")
+                self.store.event(job["id"], "逐资产视觉质检通过")
                 return result
             self.store.event(job["id"], f"第 {number} 次未通过视觉质检，已记录问题与修正建议")
         raise ProviderFailure("IMAGE_QC_EXHAUSTED", "图片未通过自动视觉质检，已达到重试上限；请检查任务详情")
@@ -1114,6 +1360,8 @@ class Workflow:
 
     def save_output(self, job, artifact_id, result):
         s = job["snapshot"]
+        if job["stage"] == "reference" and s.get("reference_role"):
+            result.setdefault("metadata", {})["reference_role"] = s["reference_role"]
         value = {
             **result,
             "id": artifact_id,
@@ -1129,6 +1377,10 @@ class Workflow:
             "review": "pending",
             "created_at": now(),
         }
+        qc = result.get("metadata", {}).get("visual_qc")
+        if job["stage"] in {"reference", "keyframe"} and qc and not s.get("canonical_bootstrap"):
+            value.update(review="approved", review_version=1, approved_once=True, reviewed_at=now(),
+                         review_method="automatic_visual_qc", review_note="完整规范及逐资产检查通过")
         if job["stage"] in {"audio", "render"} and s.get("audio_fingerprint"):
             value["audio_fingerprint"] = s["audio_fingerprint"]
         self.store.save_artifact(value)

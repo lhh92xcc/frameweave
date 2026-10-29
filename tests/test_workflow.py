@@ -71,6 +71,8 @@ def test_plan_validation_covers_duration_chapters_and_bindings(client, project):
 
 
 def add_artifact(workflow, p, kind, entity_id, deps=(), review="pending"):
+    # Actual local bytes are required for immutable reference manifests.
+    (workflow.store.media / "test.png").write_bytes((Path(__file__).parent / "fixtures/reference.png").read_bytes())
     value = {
         "id": uid("art"),
         "project_id": p["id"],
@@ -111,7 +113,12 @@ def test_review_dependencies_and_new_reference_invalidates_downstream(app, clien
     keyframe = add_artifact(w, p, "keyframe", "ep1_s01", [ref["id"]], "approved")
     video = add_artifact(w, p, "video", "ep1_s01", [keyframe["id"]], "approved")
     assert w.latest(p, "video", "ep1_s01")["id"] == video["id"]
-    add_artifact(w, p, "reference", "lin", review="pending")
+    replacement = add_artifact(w, p, "reference", "lin", review="approved")
+    current = w.store.project(p["id"])
+    # Candidates do not redefine identity; selecting a new approved original does.
+    assert w.latest(current, "keyframe", "ep1_s01")["id"] == keyframe["id"]
+    w.bind_master(p["id"], "lin", replacement["id"], current["version"])
+    p = w.store.project(p["id"])
     assert w.latest(p, "keyframe", "ep1_s01") is None
     assert w.latest(p, "video", "ep1_s01") is None
     assert client.post(f"/api/artifacts/{video['id']}/review", json={"approved": True}).status_code == 409

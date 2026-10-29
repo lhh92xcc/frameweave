@@ -252,6 +252,7 @@ def test_cast_change_invalidates_render_but_preserves_video_and_key_rotation(cli
     p = cast(client, approve_with_plan(client, project))
     w = app.state.workflow
     fixtures = {}
+    (w.store.media / "offline-fixture").write_bytes(b"offline dependency graph fixture")
     # Offline dependency-graph fixtures; no generated media or external output is claimed.
     for stage, entity in [("reference", "lin"), ("keyframe", "ep1_s01"), ("video", "ep1_s01"),
                           ("audio", "ep1_s01"), ("render", "ep1")]:

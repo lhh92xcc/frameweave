@@ -3,19 +3,15 @@ from pathlib import Path
 
 import httpx
 import pytest
-from conftest import approve_with_plan
+from conftest import approve_with_plan, offline_visual_qc, plan_for
 
 from studio.models import RoutingSettings
 from studio.providers import ProviderFailure
 from studio.store import uid
-from studio.workflow import QC_CHECKS
 
 
 def qc(result="pass", correction=""):
-    return json.dumps({
-        "checks": {key: {"result": result, "finding": "offline fixture"} for key in QC_CHECKS},
-        "correction": correction,
-    })
+    return offline_visual_qc(result=result, correction=correction)
 
 
 @pytest.mark.asyncio
@@ -83,15 +79,15 @@ def test_offline_multi_reference_binding_invalidates_downstream(app, client, pro
     approved = approve_with_plan(client, project)
     png = (Path(__file__).parent / "fixtures/reference.png").read_bytes()
     uploads = []
-    for _ in range(2):
-        item = client.post(f"/api/projects/{approved['id']}/upload", data={"stage": "reference", "entity_id": "lin"}, files={"file": ("reference.png", png, "image/png")}).json()
+    for role in ("front", "side"):
+        item = client.post(f"/api/projects/{approved['id']}/upload", data={"stage": "reference", "entity_id": "lin", "reference_role": role}, files={"file": ("reference.png", png, "image/png")}).json()
         assert client.post(f"/api/artifacts/{item['id']}/review", json={"approved": True}).status_code == 200
         uploads.append(item)
     current = client.get(f"/api/projects/{approved['id']}").json()
-    response = client.put(f"/api/projects/{approved['id']}/shots/ep1_s01/references", json={"artifact_ids": [uploads[0]["id"]], "expected_version": current["version"]})
+    response = client.put(f"/api/projects/{approved['id']}/shots/ep1_s01/references", json={"artifact_ids": [uploads[1]["id"]], "expected_version": current["version"]})
     assert response.status_code == 200, response.text
     snapshot = workflow.snapshot(workflow.store.project(approved["id"]), "keyframe", "ep1_s01")
-    assert snapshot["dependencies"] == [uploads[1]["id"], uploads[0]["id"]]
+    assert snapshot["dependencies"] == [uploads[0]["id"], uploads[1]["id"]]
     bad = client.put(f"/api/projects/{approved['id']}/shots/ep1_s01/references", json={"artifact_ids": [uid("art")], "expected_version": response.json()["version"]})
     assert bad.status_code == 404
 
@@ -99,18 +95,24 @@ def test_offline_multi_reference_binding_invalidates_downstream(app, client, pro
 def test_offline_previous_keyframe_dependency_goes_stale(app, client, project):
     workflow = app.state.workflow
     approved = approve_with_plan(client, project)
+    plan = plan_for(approved)
+    shot = plan["episodes"][0]["shots"][0]
+    shot["duration"] = 5
+    plan["episodes"][0]["shots"].append({**shot, "id": "ep1_s02"})
+    workflow.edit_plan(approved["id"], plan, 1)
+    workflow.approve_plan(approved["id"], 2)
     png = (Path(__file__).parent / "fixtures/reference.png").read_bytes()
     upload = client.post(f"/api/projects/{approved['id']}/upload", data={"stage": "reference", "entity_id": "lin"}, files={"file": ("reference.png", png, "image/png")}).json()
     assert client.post(f"/api/artifacts/{upload['id']}/review", json={"approved": True}).status_code == 200
     previous = client.post(f"/api/projects/{approved['id']}/upload", data={"stage": "keyframe", "entity_id": "ep1_s01"}, files={"file": ("frame.png", png, "image/png")}).json()
     assert client.post(f"/api/artifacts/{previous['id']}/review", json={"approved": True}).status_code == 200
     current = client.get(f"/api/projects/{approved['id']}").json()
-    response = client.put(f"/api/projects/{approved['id']}/shots/ep2_s01/references", json={"artifact_ids": [], "previous_shot_id": "ep1_s01", "expected_version": current["version"]})
+    response = client.put(f"/api/projects/{approved['id']}/shots/ep1_s02/references", json={"artifact_ids": [], "previous_shot_id": "ep1_s01", "expected_version": current["version"]})
     assert response.status_code == 200, response.text
-    assert workflow.dependencies(workflow.store.project(approved["id"]), "keyframe", "ep2_s01") == [upload["id"], previous["id"]]
+    assert workflow.dependencies(workflow.store.project(approved["id"]), "keyframe", "ep1_s02") == [upload["id"], previous["id"]]
     assert client.post(f"/api/artifacts/{previous['id']}/review", json={"approved": False}).status_code == 200
     with pytest.raises(ValueError, match="连续性参考"):
-        workflow.dependencies(workflow.store.project(approved["id"]), "keyframe", "ep2_s01")
+        workflow.dependencies(workflow.store.project(approved["id"]), "keyframe", "ep1_s02")
 
 
 @pytest.mark.asyncio

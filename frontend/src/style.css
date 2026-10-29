@@ -1,9 +1,12 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;550;600;650;700&display=swap");
 :root {
   font-family:
     "DM Sans",
     "Noto Sans SC",
     -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
     sans-serif;
   color: #302d3e;
   background: #f8f9fb;
@@ -4901,5 +4904,193 @@ code {
   }
   .activity-state > .text-button {
     margin-left: 30px;
+  }
+}
+
+/* Workspace hierarchy and compact review tools. */
+.workspace-heading {
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.workspace-heading > div:first-child {
+  min-width: 0;
+}
+.workspace-title h1 {
+  font-size: clamp(21px, 2vw, 26px);
+  overflow-wrap: anywhere;
+}
+.workspace-heading p {
+  font-size: 13px;
+  line-height: 1.7;
+}
+.workspace-heading .btn,
+.panel-toolbar .btn {
+  min-height: 40px;
+  font-size: 12px;
+}
+.pipeline-steps {
+  padding: 10px;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-color: #e7e2ee;
+}
+.pipeline-step {
+  padding: 10px 8px;
+  border-radius: 8px;
+}
+.pipeline-step.active {
+  background: #f3effb;
+}
+.pipeline-step b {
+  color: #756782;
+  font-size: 12px;
+}
+.pipeline-step.active b {
+  color: #684c9a;
+  font-weight: 600;
+}
+.pipeline-step small {
+  font-size: 10px;
+  color: #8d8098;
+  margin-top: 4px;
+}
+.step-arrow {
+  display: none;
+}
+.panel-toolbar {
+  padding: 18px 24px;
+  border-bottom-color: #eeebf3;
+}
+.media-filters {
+  gap: 10px 16px;
+  padding: 16px 24px;
+}
+.media-filters .segmented button {
+  min-height: 36px;
+  font-size: 12px;
+}
+.media-filters > select {
+  color: #6c597d;
+  font-size: 13px;
+}
+.batch-review {
+  padding: 12px 14px;
+  background: #faf9fc;
+  border-color: #e9e4f0;
+}
+.batch-review-controls {
+  gap: 8px;
+}
+.batch-review-controls > span {
+  flex: 1;
+  min-width: 155px;
+  font-variant-numeric: tabular-nums;
+}
+.batch-review .btn {
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+.batch-review-note {
+  margin-top: 10px;
+}
+.batch-review-note input {
+  padding: 8px 10px;
+}
+.batch-review > p.muted {
+  font-size: 11px;
+  line-height: 1.6;
+  color: #80728d;
+}
+.media-card {
+  border-color: #e8e2ee;
+  border-radius: 12px;
+  box-shadow: 0 2px 6px #30223e04;
+}
+.media-card-info h3 {
+  font-size: 14px;
+  color: #594568;
+}
+.panel-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 200px;
+  color: #80708e;
+  font-size: 13px;
+}
+.panel-loading-dot {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #e5ddef;
+  border-top-color: #9575b4;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@media (max-width: 1200px) and (min-width: 681px) {
+  .pipeline-steps {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 680px) {
+  .workspace-heading {
+    gap: 12px;
+  }
+  .workspace-heading .btn,
+  .panel-toolbar .btn {
+    min-height: 44px;
+  }
+  .pipeline-steps {
+    padding: 6px;
+    gap: 4px;
+  }
+  .pipeline-step {
+    padding: 9px 5px;
+    gap: 6px;
+  }
+  .pipeline-step b {
+    font-size: 11px;
+  }
+  .pipeline-step small {
+    font-size: 9px;
+  }
+  .pipeline-step .step-index {
+    width: 22px;
+    height: 25px;
+  }
+  .panel-toolbar,
+  .media-filters {
+    padding: 14px 12px;
+  }
+  .media-filters > .muted {
+    margin-left: 0;
+    width: 100%;
+    line-height: 1.7;
+  }
+  .batch-review {
+    margin: 0 12px 16px;
+    padding: 12px;
+  }
+  .batch-review-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .batch-review-controls > span {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+  .batch-review .btn,
+  .media-filters .segmented button {
+    min-height: 44px;
+  }
+  .batch-review-note input,
+  .media-filters > select {
+    font-size: 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-loading-dot {
+    animation: none;
   }
 }

@@ -112,3 +112,15 @@ def approve_with_plan(client, p):
     result = client.post(f"/api/projects/{id_}/plan/approve", json={"revision": 1})
     assert result.status_code == 200, result.text
     return client.get(f"/api/projects/{id_}").json()
+
+
+def offline_visual_qc(asset_ids=("lin",), result="pass", correction=""):
+    """Synthetic reviewer payload for transport and workflow checks only."""
+    from studio.workflow import ASSET_CHECKS, QC_CHECKS
+
+    return json.dumps({
+        "checks": {key: {"result": result, "finding": "offline fixture"} for key in QC_CHECKS},
+        "asset_checks": {id_: {key: {"result": result, "finding": "offline fixture"} for key in ASSET_CHECKS}
+                         for id_ in asset_ids},
+        "correction": correction,
+    })

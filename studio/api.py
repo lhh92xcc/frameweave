@@ -27,6 +27,7 @@ from studio.models import (
     ContractEdit,
     PlanEdit,
     ProjectCreate,
+    ReferenceMasterEdit,
     ReferenceRoleEdit,
     Review,
     RoutingSettings,
@@ -176,7 +177,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
 
     @app.post("/api/projects/{project_id}/plan/approve")
     async def approve_plan(project_id: str, body: dict):
-        return workflow.approve_plan(project_id, body.get("revision"))
+        return workflow.approve_plan(project_id, body.get("revision"), body.get("contract_hash"))
 
     @app.put("/api/projects/{project_id}/audio-cast")
     async def audio_cast(project_id: str, body: AudioCast):
@@ -188,13 +189,20 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     @app.post("/api/projects/{project_id}/jobs", status_code=202)
     async def generate(project_id: str, body: StageRequest):
         return workflow.enqueue(
-            project_id, body.stage, body.entity_id, body.force, reference_source_id=body.reference_source_id
+            project_id, body.stage, body.entity_id, body.force, reference_source_id=body.reference_source_id,
+            reference_role=body.reference_role,
         )
 
     @app.put("/api/projects/{project_id}/shots/{shot_id}/references")
     async def shot_references(project_id: str, shot_id: str, body: ShotReferences):
         return workflow.project_view(workflow.set_shot_references(
             project_id, shot_id, body.artifact_ids, body.previous_shot_id, body.expected_version
+        ))
+
+    @app.put("/api/projects/{project_id}/assets/{entity_id}/master")
+    async def reference_master(project_id: str, entity_id: str, body: ReferenceMasterEdit):
+        return workflow.project_view(workflow.bind_master(
+            project_id, entity_id, body.artifact_id, body.expected_version
         ))
 
     @app.post("/api/projects/{project_id}/automation")
@@ -332,6 +340,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                             if j["stage"] == "reference" and j["snapshot"]["dependencies"]
                             else None
                         ),
+                        reference_role=j["snapshot"].get("reference_role"),
                     )
             j.update(status="queued", error=None)
             store.save_job(j)
@@ -350,6 +359,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                 if j["stage"] == "reference" and j["snapshot"]["dependencies"]
                 else None
             ),
+            reference_role=j["snapshot"].get("reference_role"),
         )
 
     @app.post("/api/projects/{project_id}/upload", status_code=201)
@@ -366,7 +376,8 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                 raise ValueError("参考图分类与素材类型不匹配")
         elif reference_role != "general":
             raise ValueError("只有素材参考图可以设置参考分类")
-        snapshot = workflow.snapshot(p, stage, entity_id, allow_unapproved_reference=stage == "reference")
+        snapshot = workflow.snapshot(p, stage, entity_id, allow_unapproved_reference=stage == "reference",
+                                     reference_role=reference_role if stage == "reference" else None)
         chunks, size = [], 0
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
@@ -459,6 +470,10 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         old_role = artifact.get("metadata", {}).get("reference_role", "general")
         if old_role == body.role:
             return artifact
+        from studio.reference_policy import read_policy
+
+        if read_policy(project["contract"]["markdown"]):
+            raise ValueError("强制参考项目不能靠重分类补齐视角，请按实际视角重新导入并审核")
         artifact.setdefault("metadata", {})["reference_role"] = body.role
         artifact["review"] = "pending"
         artifact["review_version"] = artifact.get("review_version", 0) + 1

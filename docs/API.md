@@ -20,7 +20,8 @@ MiniMax 配音使用 `audio_mode: "cloud"`、`audio.provider: "minimax"`、`audi
 | `PUT /api/projects/{id}/plan` | 编辑已校验计划：`{plan, expected_revision}` |
 | `POST /api/projects/{id}/plan/approve` | 批准分镜版本：`{revision}` |
 | `PUT /api/projects/{id}/audio-cast` | `{voices, speakers, expected_version}`；角色声线及逐镜说话者，修改使相关音轨与成片失效 |
-| `POST /api/projects/{id}/jobs` | 异步步骤：`{stage, entity_id, force, reference_source_id?}`；后者仅用于参考图重生 |
+| `POST /api/projects/{id}/jobs` | 异步步骤：`{stage, entity_id, force, reference_source_id?, reference_role?}`；后两者仅用于参考图生成 |
+| `PUT /api/projects/{id}/assets/{asset_id}/master` | 默认一致性项目明确选择新母版：`{artifact_id, expected_version}`；须为当前已批准独立原图，切换使下游失效 |
 | `PUT /api/projects/{id}/shots/{shot_id}/references` | 保存逐镜额外已批准素材参考和已批准前镜：`{artifact_ids, previous_shot_id, expected_version}`；改变依赖会使下游失效 |
 | `GET /api/jobs/{id}/image-attempts/{number}` | 读取该任务已生成的候选图，包括尚未完成初检的候选；不代表素材已批准 |
 | `POST /api/projects/{id}/automation` | 开关自动推进：`{enabled}` |
@@ -45,7 +46,7 @@ MiniMax 配音使用 `audio_mode: "cloud"`、`audio.provider: "minimax"`、`audi
 | `/api/gateway/accounts`、`web-image-providers`、`video-providers` | 受限制的本机账号管理转发 |
 | `GET /api/upstreams` | 上游固定版本 |
 
-参考素材上传可传 `reference_role`（人物 `front`、`side`、`full_body`、`costume`、`accessory`；场景 `wide`、`reverse`、`spatial`；道具/产品 `detail`、`held`；默认 `general`）。路由 `qc_max_cost_cny` 是用户填写的单次最高预计费用，`image_qc_budget_cny` 是每个图片任务的预计预算，默认 0；可能付费的图片/视觉请求会先预留预算，不代表实际账单上限。
+参考素材上传可传 `reference_role`（人物 `front`、`side`、`left`、`right`、`back`、`full_body`、`detail`、`costume`、`accessory`；场景 `wide`、`reverse`、`spatial`；道具/产品 `detail`、`held`；默认 `general`）。路由 `qc_max_cost_cny` 是用户填写的单次最高预计费用，`image_qc_budget_cny` 是每个图片任务的预计预算，默认 0；可能付费的图片/视觉请求会先预留预算，不代表实际账单上限。
 
 Gemini 账号通过 `POST /api/gateway/accounts` 添加，`PUT /api/gateway/accounts/{id}` 更新名称、凭据或启停状态，`POST /api/gateway/accounts/{id}/connect` 分别检查连接。账号目录返回每个账号的 `enabled` 和 `state`，不返回 Cookie；当前网关最多保存 8 个，停用不删除凭据。其他连接器目前各保存一套凭据。网关按添加顺序优先使用已启用账号，额度不足或部分超时可能切换账号；超时切换可能重复请求，需核对网页记录。
 
@@ -53,11 +54,19 @@ Gemini 账号通过 `POST /api/gateway/accounts` 添加，`PUT /api/gateway/acco
 
 阶段 `stage`：`requirements`、`plan`、`reference`、`keyframe`、`video`、`audio`、`render`。模型生成的图片/视频阶段要求规范与分镜批准；用户上传的 `reference` 是唯一例外，只要已有匹配当前规范的分镜即可导入，但必须等待规范和分镜批准后审核；关键帧要求引用素材批准；视频要求关键帧批准；合成要求全部输入视频及独立配音批准。
 
-重生 `reference` 可通过 `reference_source_id` 绑定同项目、同实体、当前规范与分镜版本下已批准的参考图。不指定时，自动选用当前版本该实体最近上传的原图；如果它尚未批准，或者上传原图仅属于旧版本，生成会被拒绝而不会退回文字生图。没有上传原图时仍可从文字创建素材。来源素材 ID 记录在任务快照及新素材 `dependencies` 中，实际文件会上传至模型渠道；原图和审核记录不变，新图为待审核。即使新图成为当前候选，后续重生仍默认以原上传图为依据。提交或接收结果时若候选、来源审核或版本已变化，任务不会覆盖当前素材。
+所有项目默认锁定每个资产的母版，`reference_source_id` 只能指定当前已批准的独立母版，不能用派生图重定身份。不指定时复用已锁定母版；首张母版可从规范生成，待人工确认。后续生成携带实际文件、审核版本和 SHA-256；派生参考图与关键帧通过完整规范及逐资产检查后自动批准。新候选不会自动替换母版，明确切换使用 `assets/{asset_id}/master`，且不能恢复旧下游批准。规范或分镜修改后必须重新确认素材。
+
+项目 `reference_readiness.mode` 为 `automatic` 或 `explicit`。全部项目自动绑定同集紧邻上一镜关键帧，第一镜不跨集引用。图片快照新增 `consistency_version`、`qc_assets`、`project_asset_catalog`、`reference_policy_mode` 与参考文件清单；缺少新检查版本的旧图片任务停止并报 `CONSISTENCY_UPGRADE_REQUIRED`。
+
+视觉结果必须包含十项 `checks` 以及按资产 ID 精确覆盖的 `asset_checks`，每个资产含 `identity`、`appearance`、`state`、`spatial`；每项包含 `result` 和 `finding`。逐资产检查不允许跳过；失败或不确定时按 `correction` 自动修正提示词再生成，结构不全时停止。通过的生成图记录 `visual_qc.total_attempts` 及 `review_method: automatic_visual_qc`；首次生成母版和用户上传图仍为 `pending`。人工否决图片自动创建返工任务，响应含 `rework_job_id`；无法安排时含 `rework_blocked`，审核决定仍保存。返工链继承剩余次数与预留费用，失败候选不能用于下游。
+
+上述默认参考行为在规范包含 `frameweave-reference-policy` 时受 [强制参考规则](REFERENCE_CONSISTENCY.md) 约束：不允许无母版生图，`reference_source_id` 只能指向当前已批准母版；`reference_role` 只能选择必备派生视角，省略时选择下一待补视角。上传母版须指定第一必备视角，其余上传自动继承母版。不能用改分类补视角。项目返回 `reference_readiness`，列出每个必备视角的素材 ID 及来源仍有效的批准状态。相同文件伪装不同视角会在剧情图提交前被拒绝。
+
+`POST /api/projects/{id}/plan/approve` 接受 `{revision, contract_hash?}`。规范修订后，可在规范已批准且传入精确当前哈希的条件下重新校验并批准保留的分镜，不重新生成台词或清空角色声音选择；省略或传入旧哈希不能跨规范复核。修改规范仍先使全部下游审批失效。
 
 项目创建字段包括 `title`、`mode`、`source`、`brief`、`episodes`（1–50）、`duration`（每集5–600秒）、`aspect_ratio`、`language`、`style`。分镜计划 Schema 见 OpenAPI；所有素材、集与镜头 ID 全局唯一；各集时长精确匹配，来源章节全覆盖。
 
-任务状态：`queued`、`running`、`succeeded`、`blocked`、`failed`、`cancelled`。素材审核：`pending`、`approved`、`rejected`；`stale` 是相对当前规范、分镜和引用版本计算的状态。执行成功不自动批准。
+任务状态：`queued`、`running`、`succeeded`、`blocked`、`failed`、`cancelled`。素材审核：`pending`、`approved`、`rejected`；`stale` 是相对当前规范、分镜和引用版本计算的状态。执行成功与质检通过分别记录，只有通过新逐资产检查的派生图片自动批准，上传图、首次母版、视频与音频仍待人工审核。
 
 图片和视频素材的 `route` 记录成功使用的 `provider`、`model`、`transport` 和 `paid`；Seedream 兜底使用网关实际返回的供应商与模型，而非原先请求的 Gemini。模型字段为渠道记录值，不表示工作台独立验证过供应商内部模型版本。上传、历史导入或缺少来源的素材不能据此推断生成渠道或费用。
 

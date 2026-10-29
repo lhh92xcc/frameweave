@@ -3,11 +3,10 @@ from pathlib import Path
 
 import httpx
 import pytest
-from conftest import approve_with_plan
+from conftest import approve_with_plan, offline_visual_qc
 
 from studio.models import RoutingSettings
 from studio.providers import ProviderFailure, Providers, gateway_result_uncertain
-from studio.workflow import QC_CHECKS
 
 
 def mock_offline_visual_pass(monkeypatch, workflow):
@@ -15,10 +14,7 @@ def mock_offline_visual_pass(monkeypatch, workflow):
 
     async def generate(kind, *args, **kwargs):
         if kind == "vision":
-            return {"text": json.dumps({
-                "checks": {key: {"result": "pass", "finding": "offline mock"} for key in QC_CHECKS},
-                "correction": "",
-            })}
+            return {"text": offline_visual_qc(asset_ids=[asset["id"] for asset in args[0]["snapshot"]["qc_assets"]])}
         return await original(kind, *args, **kwargs)
 
     monkeypatch.setattr(workflow.providers, "generate", generate)
@@ -145,7 +141,7 @@ async def test_offline_reference_regeneration_uploads_original_and_records_bindi
     assert saved_job["status"] == "succeeded"
     artifact = workflow.store.artifact(saved_job["artifact_id"])
     assert artifact["dependencies"] == [upload["id"]]
-    assert artifact["review"] == "pending"
+    assert artifact["review"] == "approved" and artifact["review_method"] == "automatic_visual_qc"
     assert workflow.store.artifact(upload["id"])["review"] == "approved"
     assert (workflow.store.media / upload["file"]).read_bytes() == png
     assert [request.url.path for request in requests].count("/api/references") == 1

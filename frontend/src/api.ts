@@ -77,9 +77,12 @@ export interface Artifact {
   job_id: string;
   project_title?: string;
   review_note?: string;
+  review_method?: string;
   archived?: boolean;
   title?: string;
   thumbnail_url?: string;
+  rework_job_id?: string;
+  rework_blocked?: string;
   storage?: {
     backend: "cos";
     bucket: string;
@@ -137,6 +140,7 @@ export interface Project {
   version: number;
   shot_reference_bindings?: Record<string, { artifact_ids: string[]; previous_shot_id: string | null }>;
   audio_cast?: { voices: Record<string, any>; speakers: Record<string, string> };
+  reference_readiness?: { assets: Record<string, { required_roles: string[]; shot_roles: string[]; views: { role: string; artifact_id?: string; approved: boolean }[] }>; max_references: number; mode?: "automatic" | "explicit" } | null;
   title: string;
   mode: string;
   brief: string;

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, shallowRef, computed, defineAsyncComponent, onMounted, onUnmounted } from "vue";
 import { api, libraryPrimary, type Project, type Template } from "./api";
 import Icon from "./Icon.vue";
-import CreateProject from "./CreateProject.vue";
-import ProjectWorkspace from "./ProjectWorkspace.vue";
-import SettingsPanel from "./SettingsPanel.vue";
-import JobQueue from "./JobQueue.vue";
-import ArtifactGallery from "./ArtifactGallery.vue";
+import PanelLoading from "./PanelLoading.vue";
+import { usePolling } from "./usePolling";
+const CreateProject = defineAsyncComponent(() => import("./CreateProject.vue"));
+const ProjectWorkspace = defineAsyncComponent({ loader: () => import("./ProjectWorkspace.vue"), loadingComponent: PanelLoading });
+const SettingsPanel = defineAsyncComponent({ loader: () => import("./SettingsPanel.vue"), loadingComponent: PanelLoading });
+const JobQueue = defineAsyncComponent({ loader: () => import("./JobQueue.vue"), loadingComponent: PanelLoading });
+const ArtifactGallery = defineAsyncComponent({ loader: () => import("./ArtifactGallery.vue"), loadingComponent: PanelLoading });
 const nav = [
   { id: "home", name: "创作概览", icon: "grid" },
   { id: "projects", name: "我的项目", icon: "folder" },
@@ -14,9 +16,9 @@ const nav = [
   { id: "jobs", name: "生成队列", icon: "clapper" },
 ];
 const page = ref("home"),
-  projects = ref<Project[]>([]),
+  projects = shallowRef<Project[]>([]),
   templates = ref<Template[]>([]),
-  selected = ref<Project | null>(null),
+  selected = shallowRef<Project | null>(null),
   health = ref<any>({}),
   creating = ref(false),
   createMode = ref("drama"),
@@ -26,9 +28,9 @@ const page = ref("home"),
   toast = ref(""),
   mobileNav = ref(false);
 const libraryProject = ref("");
-let timer: ReturnType<typeof setInterval>,
-  toastTimer: ReturnType<typeof setTimeout>;
+let toastTimer: ReturnType<typeof setTimeout>;
 let pendingRefresh: Promise<void> | null = null;
+let listUpdatedAt = 0, healthUpdatedAt = 0, projectRequest = 0;
 const titles: Record<string, string> = {
   home: "创作概览",
   projects: "我的项目",
@@ -68,6 +70,7 @@ function notify(message: string) {
   toastTimer = setTimeout(() => (toast.value = ""), 4500);
 }
 function navigate(id: string) {
+  projectRequest++;
   page.value = id;
   mobileNav.value = false;
   location.hash = id;
@@ -75,6 +78,7 @@ function navigate(id: string) {
   if (id !== "project") selected.value = null;
 }
 function openLibrary(projectId: string) {
+  projectRequest++;
   libraryProject.value = projectId;
   page.value = "assets";
   selected.value = null;
@@ -83,7 +87,10 @@ function openLibrary(projectId: string) {
 async function refresh() {
   // A mutation's refresh runs after any earlier poll, and callers can await it.
   while (pendingRefresh) await pendingRefresh;
-  const request = refreshNow();
+  await startRefresh(true);
+}
+async function startRefresh(force: boolean) {
+  const request = refreshNow(force);
   pendingRefresh = request;
   try {
     await request;
@@ -91,32 +98,48 @@ async function refresh() {
     if (pendingRefresh === request) pendingRefresh = null;
   }
 }
-async function refreshNow() {
+async function refreshNow(force: boolean) {
   const selectedId = selected.value?.id;
+  const navigation = projectRequest;
+  const refreshList = force || Date.now() - listUpdatedAt >= 30000;
+  const refreshHealth = !healthUpdatedAt || Date.now() - healthUpdatedAt >= 30000;
   try {
     const [ps, h, detail] = await Promise.all([
-      api<Project[]>("/projects"),
-      api("/health"),
+      refreshList ? api<Project[]>("/projects") : Promise.resolve(null),
+      refreshHealth ? api("/health") : Promise.resolve(null),
       selectedId
         ? api<Project>("/projects/" + selectedId)
         : Promise.resolve(null),
     ]);
-    projects.value = ps;
-    health.value = h;
-    if (detail && selected.value?.id === selectedId) selected.value = detail;
+    if (ps) {
+      projects.value = ps;
+      listUpdatedAt = Date.now();
+    }
+    if (h) {
+      health.value = h;
+      healthUpdatedAt = Date.now();
+    }
+    if (detail && selected.value?.id === selectedId && navigation === projectRequest) {
+      selected.value = detail;
+      projects.value = projects.value.map((project) => project.id === detail.id ? detail : project);
+    }
     error.value = "";
   } catch (e: any) {
     error.value = e.message;
   }
 }
 async function openProject(p: Project) {
+  if (selected.value?.id === p.id && page.value === "project") return;
+  const request = ++projectRequest;
   try {
-    selected.value = await api<Project>("/projects/" + p.id);
+    const result = await api<Project>("/projects/" + p.id);
+    if (request !== projectRequest) return;
+    selected.value = result;
     page.value = "project";
     location.hash = "project/" + p.id;
     mobileNav.value = false;
   } catch (e: any) {
-    notify(e.message);
+    if (request === projectRequest) notify(e.message);
   }
 }
 function create(mode = "drama") {
@@ -135,26 +158,32 @@ async function parseHash() {
     const p = projects.value.find((p) => p.id === pid);
     if (p) await openProject(p);
   } else if (id === "assets") {
+    projectRequest++;
     libraryProject.value = pid || "";
     page.value = "assets";
     selected.value = null;
   } else if (["home", "projects", "jobs", "settings"].includes(id)) {
+    projectRequest++;
     page.value = id;
+    selected.value = null;
   }
 }
+usePolling(async () => {
+  if (!pendingRefresh) await startRefresh(false);
+}, 4000, false);
 onMounted(async () => {
   try {
-    templates.value = await api<Template[]>("/templates");
-    await refresh();
+    await Promise.all([
+      api<Template[]>("/templates").then((value) => { templates.value = value; }),
+      refresh(),
+    ]);
     await parseHash();
   } catch (e: any) {
     error.value = e.message;
   }
-  timer = setInterval(refresh, 4000);
   window.addEventListener("hashchange", parseHash);
 });
 onUnmounted(() => {
-  clearInterval(timer);
   clearTimeout(toastTimer);
   window.removeEventListener("hashchange", parseHash);
 });
@@ -459,10 +488,11 @@ onUnmounted(() => {
                   :src="
                     p.artifacts.find(
                       (a) => a.mime.startsWith('image/') && !a.stale,
-                    )!.url
+                    )!.thumbnail_url || p.artifacts.find((a) => a.mime.startsWith('image/') && !a.stale)!.url
                   "
                   alt="项目生成素材预览"
                   loading="lazy"
+                  decoding="async"
                 /><template v-else
                   ><div class="cover-geometry" />
                   <Icon

@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 REFERENCE_ROLES = {
-    "character": {"general", "front", "side", "full_body", "costume", "accessory"},
+    "character": {"general", "front", "side", "left", "right", "back", "full_body", "detail", "costume", "accessory"},
     "location": {"general", "wide", "reverse", "spatial"},
     "prop": {"general", "detail", "held"},
     "product": {"general", "detail", "held"},
@@ -166,6 +166,7 @@ class StageRequest(StrictModel):
     entity_id: str = Field(default="", max_length=80)
     force: bool = False
     reference_source_id: str | None = Field(default=None, min_length=1, max_length=80)
+    reference_role: str | None = Field(default=None, min_length=1, max_length=40)
 
 
 class ShotReferences(StrictModel):
@@ -176,6 +177,11 @@ class ShotReferences(StrictModel):
 
 class ReferenceRoleEdit(StrictModel):
     role: str = Field(min_length=1, max_length=40)
+
+
+class ReferenceMasterEdit(StrictModel):
+    artifact_id: str = Field(min_length=1, max_length=80)
+    expected_version: int = Field(ge=0)
 
 
 class Review(StrictModel):

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, ref, shallowRef, watch } from "vue";
 import {
   api,
   libraryPrimary,
@@ -9,15 +9,17 @@ import {
   type Project,
 } from "./api";
 import Icon from "./Icon.vue";
-import MediaDetail from "./MediaDetail.vue";
 import ArtifactSource from "./ArtifactSource.vue";
 import VoiceLibraryPanel from "./VoiceLibraryPanel.vue";
+const MediaDetail = defineAsyncComponent(() => import("./MediaDetail.vue"));
 const emit = defineEmits<{ notify: [message: string] }>(),
-  artifacts = ref<Artifact[]>([]),
+  artifacts = shallowRef<Artifact[]>([]),
   filter = ref("all"),
   includeOld = ref(false),
   detail = ref<Artifact | null>(null),
-  error = ref("");
+  error = ref(""),
+  loading = ref(true);
+let pendingLoad: Promise<void> | null = null;
 const props = defineProps<{ initialProject?: string; projects?: Project[] }>();
 const projectFilter = ref(props.initialProject || ""),
   groupFilter = ref(""),
@@ -161,12 +163,22 @@ watch(projectFilter, () => {
   episodeFilter.value = "";
 });
 async function load() {
+  if (pendingLoad) return pendingLoad;
+  const request = loadNow();
+  pendingLoad = request;
+  try { await request; }
+  finally { if (pendingLoad === request) pendingLoad = null; }
+}
+async function loadNow() {
+  loading.value = true;
   try {
     artifacts.value = await api("/artifacts");
     currentPage.value = Math.min(currentPage.value, pageCount.value);
     error.value = "";
   } catch (e: any) {
     error.value = e.message;
+  } finally {
+    loading.value = false;
   }
 }
 onMounted(load);
@@ -186,7 +198,7 @@ onMounted(load);
           :href="'/api/projects/' + projectFilter + '/export.zip'"
           >下载当前素材（含待复核）</a
         >
-        <button class="btn secondary" @click="load">
+        <button class="btn secondary" :disabled="loading" @click="load">
           <Icon name="refresh" :size="16" />刷新素材
         </button>
       </div>
@@ -289,7 +301,8 @@ onMounted(load);
       >
     </div>
     <div v-if="error" class="inline-error">{{ error }}</div>
-    <div v-if="!filtered.length" class="work-panel stage-empty">
+    <div v-if="loading && !artifacts.length" class="panel-loading" role="status">正在加载素材…</div>
+    <div v-else-if="!filtered.length" class="work-panel stage-empty">
       <Icon name="images" :size="36" />
       <h3>
         {{ hasCuration ? "当前筛选下没有素材" : "每一份创作，都值得被留下。" }}
@@ -317,6 +330,7 @@ onMounted(load);
             :src="a.thumbnail_url || a.url"
             :alt="a.title || a.entity_id"
             loading="lazy"
+            decoding="async"
           /><video
             v-else-if="a.mime.startsWith('video/')"
             :src="a.url + '#t=0.1'"

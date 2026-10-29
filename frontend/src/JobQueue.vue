@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
+import { usePolling } from "./usePolling";
 import {
   api,
   jobErrorMessage,
@@ -11,11 +12,11 @@ import {
 } from "./api";
 import Icon from "./Icon.vue";
 const emit = defineEmits<{ notify: [message: string]; refresh: [] }>(),
-  jobs = ref<Job[]>([]),
+  jobs = shallowRef<Job[]>([]),
   filter = ref("all"),
   detail = ref<Job | null>(null),
   error = ref("");
-let timer: ReturnType<typeof setInterval>;
+let pendingLoad: Promise<void> | null = null;
 const filtered = computed(() =>
   jobs.value.filter(
     (j) =>
@@ -27,9 +28,21 @@ const filtered = computed(() =>
   ),
 );
 async function load() {
+  while (pendingLoad) await pendingLoad;
+  const request = loadNow();
+  pendingLoad = request;
+  try { await request; }
+  finally { if (pendingLoad === request) pendingLoad = null; }
+}
+async function loadNow() {
   try {
     jobs.value = await api("/jobs");
-    if (detail.value) detail.value = await api("/jobs/" + detail.value.id);
+    const selectedId = detail.value?.id;
+    if (selectedId) {
+      const result = await api<Job>("/jobs/" + selectedId);
+      if (detail.value?.id === selectedId) detail.value = result;
+    }
+    error.value = "";
   } catch (e: any) {
     error.value = e.message;
   }
@@ -60,11 +73,7 @@ async function show(job: Job) {
     error.value = e.message;
   }
 }
-onMounted(() => {
-  load();
-  timer = setInterval(load, 3000);
-});
-onUnmounted(() => clearInterval(timer));
+usePolling(load, 3000);
 </script>
 <template>
   <main class="queue-content">
@@ -211,7 +220,7 @@ onUnmounted(() => clearInterval(timer));
         <details v-if="detail.runtime?.image_qc_attempts?.length">
           <summary>自动视觉质检与候选图（{{ detail.runtime.image_qc_attempts.length }} 次）</summary>
           <div v-for="attempt in detail.runtime.image_qc_attempts" :key="attempt.attempt">
-            <p>第 {{ attempt.attempt }} 次 · {{ attempt.passed ? '初检通过，仍需人工审核' : '未通过' }}</p>
+            <p>第 {{ attempt.attempt }} 次 · {{ attempt.passed ? '视觉质检通过' : '未通过' }}</p>
             <p class="muted small">生图：{{ attempt.result?.route?.provider || '未知' }} / {{ attempt.result?.route?.model || '未知' }}；质检：{{ attempt.qc_route?.provider || '未知' }} / {{ attempt.qc_route?.model || '未知' }}</p>
             <a :href="`/api/jobs/${detail.id}/image-attempts/${attempt.attempt}`" target="_blank" rel="noopener">查看候选原图</a>
             <pre class="prompt-code">{{ JSON.stringify(attempt.qc, null, 2) }}</pre>

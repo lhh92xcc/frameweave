@@ -452,7 +452,7 @@ test("offline fixture: reference regeneration shows the uploaded source and its 
     .getByRole("button", { name: /素材参考/ })
     .click();
   const first = page.locator(".media-card").filter({ has: page.getByRole("heading", { name: "人物", exact: true }) });
-  await expect(first).toContainText("重新生成将使用已批准的上传原图");
+  await expect(first).toContainText("后续生成始终复用已锁定母版");
   await first.getByRole("button", { name: "审核", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "素材预览与审核" });
   await expect(dialog.getByRole("link", { name: "查看绑定原图" })).toHaveAttribute(

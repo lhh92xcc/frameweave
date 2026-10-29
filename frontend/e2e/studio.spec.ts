@@ -26,6 +26,7 @@ test("real studio: source, contract, storyboard, imported references, video, rev
   await expect(
     page.getByRole("heading", { name: title, exact: true }),
   ).toBeVisible();
+  await expect(page).toHaveURL(/#project\/project_[a-z0-9]+$/);
   const id = page.url().split("project/")[1];
   const detail = await (await request.get("/api/projects/" + id)).json();
   expect(detail.chapters.length).toBe(3);
