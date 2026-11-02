@@ -8,9 +8,9 @@ import getpass
 import io
 import json
 import os
-from pathlib import Path
 import sys
 import zipfile
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from studio.cloud_storage import CosStorage  # noqa: E402
