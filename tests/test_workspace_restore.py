@@ -42,3 +42,25 @@ def test_restore_verifies_and_never_overwrites(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         restore(ticket, tmp_path, target, 'offline-password')
     assert (target/'studio.sqlite3').read_bytes() == b'offline fixture database'
+
+
+def test_large_cos_read_retries_whole_chunk_before_writing(tmp_path):
+    import hashlib
+    from types import SimpleNamespace
+
+    from studio.cloud_storage import CosStorage
+    raw = b'x' * (17 * 1024 * 1024)
+    attempts = []
+    class Client:
+        def get_object(self, **kwargs):
+            start, end = map(int, kwargs['Range'][6:].split('-'))
+            attempts.append(start)
+            if len(attempts) == 1:
+                raise OSError('offline transient failure')
+            return {'Body':SimpleNamespace(get_raw_stream=lambda:io.BytesIO(raw[start:end+1]))}
+    ref = {'bucket':'offline','key':'fixture','size':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
+    out = io.BytesIO()
+    result = CosStorage(tmp_path).verify_large(ref, out, Client())
+    assert out.getvalue() == raw
+    assert attempts[:2] == [0,0]
+    assert result['verification'] == 'full-download-sha256'

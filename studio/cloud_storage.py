@@ -133,6 +133,8 @@ class CosStorage:
     def verify(self, ref, destination=None, client=None):
         self.check_ref(ref)
         client = client or self.client()
+        if ref["size"] > 16 * 1024 * 1024:
+            return self.verify_large(ref, destination, client)
         stream = None
         try:
             result = client.get_object(Bucket=ref["bucket"], Key=ref["key"])
@@ -152,6 +154,33 @@ class CosStorage:
         finally:
             if stream is not None:
                 stream.close()
+        return {**ref, "verified_at": now(), "verification": "full-download-sha256"}
+
+    def verify_large(self, ref, destination, client):
+        """Bounded range retries, followed by one whole-object SHA-256 check."""
+        checksum = hashlib.sha256()
+        for start in range(0, ref["size"], 4 * 1024 * 1024):
+            end = min(start + 4 * 1024 * 1024, ref["size"]) - 1
+            for attempt in range(3):
+                stream = None
+                try:
+                    result = client.get_object(Bucket=ref["bucket"], Key=ref["key"], Range=f"bytes={start}-{end}")
+                    stream = result["Body"].get_raw_stream()
+                    chunk = stream.read(end - start + 2)
+                    if len(chunk) != end - start + 1:
+                        raise CloudStorageError("COS 分段下载长度不符")
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise CloudStorageError("COS 分段下载失败，完整校验未完成") from None
+                finally:
+                    if stream is not None:
+                        stream.close()
+            checksum.update(chunk)
+            if destination is not None:
+                destination.write(chunk)
+        if checksum.hexdigest() != ref["sha256"]:
+            raise CloudStorageError("COS 下载内容 SHA-256 不符")
         return {**ref, "verified_at": now(), "verification": "full-download-sha256"}
 
     def upload(self, path: Path, mime=None):

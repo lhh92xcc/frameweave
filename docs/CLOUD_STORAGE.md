@@ -28,3 +28,5 @@
 `GET /api/storage` 返回不含凭据的配置、原始素材/预览数量、字节数和仍保留的本地原始副本数。`PUT /api/storage` 保存配置；留空密钥沿用同一目标的原值，`clear_keys` 显式清除。`POST /api/storage/test` 上传并读回小型测试对象，随后清理，并尝试只读获取生命周期规则，不修改桶规则。
 
 素材引用 `storage`、`thumbnail_storage`、可选 `subtitle_storage` 记录桶、地域、对象键、大小、SHA-256、完整读回校验方式与时间，不保存 SecretKey 或长期公开 URL。对象必须属于当前配置的桶、地域与前缀。
+
+大于 16 MiB 的对象采用 4 MiB Range 分段读取，每段最多重试三次，全部字节仍按顺序计算完整 SHA-256；这能降低跨电脑恢复时大视频长连接中断的影响，不以分段成功代替整文件验证。完整工作区恢复见 [HOME_SYNC.md](HOME_SYNC.md)。
