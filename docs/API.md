@@ -1,5 +1,7 @@
 # 工作台接口
 
+全自动制作接口、授权、逐帧检查与声音绑定见 [全自动制作](AUTOMATION.md#接口与兼容)。下文的人工审核、预计预算与显式手动重试默认描述保留的逐步模式。全自动模式以项目授权接替逐项人工批准，必须检查合格才能放行；不会放宽参考依赖和持久音色限制。
+
 MiniMax 配音使用 `audio_mode: "cloud"`、`audio.provider: "minimax"`、`audio.transport: "cloud"`、固定 `audio.base_url: "https://api.minimaxi.com/v1"`，默认模型 `speech-2.8-turbo`。全局 `voice` 和 `speech: {speed, vol, pitch, emotion}` 为未绑定镜头提供默认声线。`audio-cast.voices` 以人物素材 ID 或 `narrator` 为键，值为 `{voice_id, speed?, vol?, pitch?, emotion?}`；`speakers` 将镜头 ID 映射到已配置角色。快照保存生产规范与参考绑定，不包含 Key。音轨与成片按声音配置判断过期；更换 Key 不影响已完成音轨。字段范围及恢复见 [MiniMax](MINIMAX.md)。参数校验只返回字段位置、类型和说明，不回显输入数据。
 
 本机 API 与界面同源于 `http://127.0.0.1:8787`，交互式 Schema 位于 `/docs`。所有修改只允许本地工作台 Origin；密钥为写入型字段，读取配置只返回 `configured`。服务不面向公网多租户部署。
@@ -81,3 +83,29 @@ Gemini 账号通过 `POST /api/gateway/accounts` 添加，`PUT /api/gateway/acco
 通用应用错误：`{error:{code,message}}`；404 为缺失，409 为版本冲突，422 为输入或前置条件问题，503 为供应商/服务不可用。HTTP Schema 校验错误由 FastAPI 的 `detail` 返回。供应商原始鉴权响应不会写入工作台错误正文。所有运行数据与凭据禁止提交 Git。
 
 COS 素材 `content` / `thumbnail` 在启用后返回 307，目标是短时签名的官方 COS HTTPS 地址；本地索引仅保存对象位置与校验信息。存储错误返回 503 `COS_STORAGE_ERROR`，不回显 SDK 原始请求、签名或凭据。见 [CLOUD_STORAGE.md](CLOUD_STORAGE.md)。
+
+### TokenHub Vidu route
+
+The existing settings `video` array accepts `transport: "cloud"`, `provider: "tokenhub-vidu"`, `base_url: "https://tokenhub.tencentmaas.com"` and a write-only TokenHub `api_key`. Model choices: `vidu-video-q2`, `vidu-video-q2-pro`, `vidu-video-q2-turbo`, `vidu-video-q3-pro`, `vidu-video-q3-turbo`. Public settings expose only `configured`; API keys are absent from generation snapshots. This is separate from `tencent-vidu` (VCLM TC3 credentials).
+
+Existing video jobs provide one approved keyframe, full prompt and integer duration (Q2 1–10 seconds, Q3 1–16 seconds). COS must be enabled for verified image upload and temporary access; TokenHub receives the object link, not COS signing credentials. Output is requested at 720p with generation audio disabled. Multiple images and explicitly bound previous-shot video inputs use reference-to-video; actual video inputs require Q2-Pro. Known TokenHub tasks retain `runtime.tokenhub_task`; retry resumes polling/downloading unless the provider confirmed terminal failure. Uncertain submissions require verification before a new request. No real-account validation is implied.
+
+### Per-shot Vidu policy
+
+Each storyboard shot has `vidu: {family: "auto" | "q2" | "q3", preference: "default" | "speed" | "quality" | "budget", audio: false, bgm: false, reference_previous_video: false}`. Missing fields retain these defaults. A TokenHub route model of `auto` applies per-shot decisions with Q3 Turbo as the unconstrained default; a concrete route model acts only as the unconstrained preference. Hard requirements override that default, but conflict with an explicit shot family is rejected.
+
+`reference_previous_video` binds the same episode's preceding approved video into dependencies and requires Q2-Pro. It cannot be used on the first shot or with audio or duration >10. Audio and bgm are exclusive; bgm plus duration >10 is invalid. Q2 payloads never contain audio, Q3 never contain bgm or videos (including empty fields). Incompatible inputs are rejected, not silently stripped. Duration must be integer 1–16, with Q2 at most 10. Additional arbitrary remote video URLs are not accepted as project references.
+
+`vidu_decisions` in the immutable job snapshot records the selected model, reason, flags and duration by route index. Runtime `tokenhub_task.decision` preserves the submitted decision for resume. Returned route provenance uses the selected model, not `auto`. Non-TokenHub fallback is blocked for explicitly specified Vidu requirements so no reference or sound instruction is ignored. Plan edits invalidate approvals using the existing version mechanism.
+
+### Site-wide production rules
+
+`GET /api/settings/pipeline` returns `rules`, `defaults`, JSON `schema`, `revision`, fixed `stages`, `hard_limits`, and `precedence`. `PUT /api/settings/pipeline` takes `{rules, expected_revision}`; stale writes return 409, invalid provider bounds/values return 422. Restore by saving `defaults` with the current revision. Groups: `vidu`, `audio`, `subtitles`, `danmaku`, `render`, `billing`, and full editable `instructions` text. Defaults are the user's complete pipeline document; unknown model-group prices remain null. Ordinary `/api/settings` requests without pipeline fields preserve saved rules.
+
+Rule changes pause active automated projects and invalidate affected old jobs/output approval; they do not start billable generation. New jobs contain `pipeline_rules` and `pipeline_revision`. The original approved contract and reference bindings are still snapshotted independently. Rule text is planning context; execution values are the validated form fields. Fixed provider capability, reference and voice restrictions cannot be overridden by prose.
+
+Shot timing accepts `speech_start` (default 0) and `speech_end` (default shot duration). Episode post-production accepts `bgm_artifact_id`, `sound_effects: [{artifact_id, time, volume}]`, `danmaku: [{start, duration?, text, color}]` (colors `#RRGGBB`). Audio references must be approved, belong to this project/current approved contract and not be archived. All render dependencies retain approval versions. Inputs default empty. The plan editor changes revision and invalidates downstream approvals. Generated subtitle and audio share the same bounded dialogue interval.
+
+Pipeline engine renders receive the rule snapshot, all clips, optional BGM/SFX and danmaku. Returns `subtitle_file` as ASS, metadata `pipeline_files`, `warnings`, audio/video duration and source count. Project exports include available private intermediate files under pipeline/. Local intermediate files are not separately covered by COS backup. Timeline warnings and degraded output are visible in media details. Native audio is replaced by default; provider billing metadata reports credit count and user-price estimate separately from a verified bill.
+
+`GET/PUT /api/settings` additionally supports `tts_resource_id` and `moderation: {enabled, biz_type, region, secret_id, secret_key, clear_keys}`. GET redacts both CAM credentials and returns `configured`; blank credentials preserve saved values, `clear_keys` removes them. Audio route provider `volcengine-tts` uses the fixed official speech origin; text provider `volcengine-ark` uses the fixed official Beijing Ark origin. Existing model/API key fields remain write-only. Moderation changes pause automatic projects.

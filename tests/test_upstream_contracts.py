@@ -228,6 +228,13 @@ async def test_actual_ffmpeg_render_and_short_clip_gate(tmp_path, monkeypatch):
         assert response.json()["metadata"]["input_clip_count"] == 2
         assert response.json()["metadata"]["ffprobe"]["duration_seconds"] == pytest.approx(2, abs=0.15)
         assert (tmp_path / "art_123456.mp4").stat().st_size > 1000
+        frames = await client.post("/video-frames", json={"file": source.name})
+        assert frames.status_code == 200, frames.text
+        manifest = frames.json()
+        assert manifest["coverage"] == "every_decoded_frame"
+        assert manifest["frame_count"] == len(manifest["frames"]) == 24
+        assert all((tmp_path / frame["file"]).is_file() for frame in manifest["frames"])
+        assert (await client.post("/video-frames", json={"file": "../outside.mp4"})).status_code == 422
         response = await client.post(
             "/render", json={"clips": [{"file": source.name, "duration": 3}], "output": "art_123456.mp4"}
         )
@@ -352,6 +359,14 @@ async def test_real_audio_mix_and_invalid_media_error(tmp_path, monkeypatch):
         metadata = result.json()["metadata"]
         assert metadata["has_audio"] and metadata["audio_track_count"] == 2
         assert metadata["ffprobe"]["duration_seconds"] == pytest.approx(2, abs=0.15)
+        fitted = await client.post("/fit-audio", json={"file": voice.name, "duration": 0.4,
+                                                       "output": "art_abcdef_fit.mp3"})
+        assert fitted.status_code == 200, fitted.text
+        assert fitted.json()["metadata"]["duration_seconds"] <= 0.55
+        assert fitted.json()["metadata"]["timing_fit"]["method"] == "pitch_preserving_atempo"
+        too_short = await client.post("/fit-audio", json={"file": voice.name, "duration": 0.05,
+                                                          "output": "art_abcdef_fit.mp3"})
+        assert too_short.status_code == 422
         invalid = await client.post("/validate", json={"file": "broken.mp4"})
         assert invalid.status_code == 422
         assert invalid.json()["code"] == "VIDEO_ARTIFACT_NOT_PLAYABLE"

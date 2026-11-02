@@ -14,6 +14,8 @@ const form = ref({
   aspect_ratio: "9:16",
   language: "简体中文",
   style: "电影感、自然光、克制表演",
+  production_mode: "manual",
+  unlimited_budget: false,
 });
 const selected = computed(() =>
     props.templates.find((t) => t.id === form.value.mode),
@@ -35,7 +37,7 @@ async function submit() {
   busy.value = true;
   error.value = "";
   try {
-    emit("created", await api<Project>("/projects", "POST", form.value));
+    emit("created", await api<Project>("/projects", "POST", { ...form.value, unlimited_budget: form.value.production_mode === 'full' }));
   } catch (e: any) {
     error.value = e.message;
   } finally {
@@ -66,10 +68,10 @@ function sample() {
       >
         <Icon name="close" />
       </button>
-      <div class="eyebrow">A NEW BEGINNING</div>
-      <h2 id="create-title">给你的灵感，一张画布。</h2>
+      <div class="eyebrow">新建作品</div>
+      <h2 id="create-title">你想做什么视频？</h2>
       <p class="muted">
-        选择创作方式，放入原始内容。接下来，我们一起建立制作蓝图。
+        导入一本小说，或直接写下想法。比如：一只橘猫做早餐的 30 秒短视频。
       </p>
       <form @submit.prevent="submit">
         <div class="mode-picker">
@@ -94,7 +96,7 @@ function sample() {
         <div class="field">
           <div class="field-heading">
             <label for="source-content"
-              >原始内容 <span class="required">*</span></label
+              >小说原文或视频需求 <span class="required">*</span></label
             >
             <div>
               <button type="button" class="text-button" @click="sample">
@@ -122,8 +124,7 @@ function sample() {
             hidden
             @change="file"
           /><span class="field-hint"
-            >{{ form.source.length.toLocaleString() }} 字 ·
-            原始内容完整保留，按章节拆分。</span
+            >{{ form.source.length.toLocaleString() }} 字 · 原文完整保留。角色、剧情、声音和不想出现的内容都可以写在这里。</span
           >
         </div>
         <div class="form-grid four">
@@ -145,9 +146,9 @@ function sample() {
             </select></label
           ><label class="field"
             >画面比例<select v-model="form.aspect_ratio">
-              <option>9:16</option>
-              <option>16:9</option>
-              <option>1:1</option>
+              <option value="9:16">竖屏 · 9:16（短视频）</option>
+              <option value="16:9">横屏 · 16:9</option>
+              <option value="1:1">方形 · 1:1</option>
             </select></label
           ><label class="field"
             >目标语言<input v-model="form.language" maxlength="80" required
@@ -167,6 +168,10 @@ function sample() {
             placeholder="想保留的细节、不能出现的内容、品牌或声音要求…"
           />
         </label>
+        <label class="full-auto-choice">
+          <input type="checkbox" :checked="form.production_mode === 'full'" @change="form.production_mode = ($event.target as HTMLInputElement).checked ? 'full' : 'manual'" />
+          <span><strong>全自动完成 · 不设费用上限</strong><small>自动生成参考图、全部镜头、配音、字幕和成片，不需要逐步批准。检查不过会持续返工；人物、场景和物品沿用同一套参考。</small><small>勾选即授权调用已配置的付费渠道，不设费用上限。不会新增定制或克隆音色，台词合成可能按用量收费。</small></span>
+        </label>
         <div v-if="error" class="inline-error" role="alert">
           <Icon name="warning" :size="17" />{{ error }}
         </div>
@@ -175,13 +180,13 @@ function sample() {
             ><Icon
               name="file"
               :size="15"
-            />创建后先生成制作规范，不会直接调用视频模型</span
+            />{{ form.production_mode === 'full' ? '创建后自动开始，可随时暂停' : '先创建项目，再查看方案或开启全自动' }}</span
           ><button class="btn primary" :disabled="busy" type="submit">
             <Icon
               :name="busy ? 'loading' : 'right'"
               :class="{ spinning: busy }"
               :size="17"
-            />{{ busy ? "正在整理内容…" : "创建项目" }}
+            />{{ busy ? "正在整理内容…" : form.production_mode === 'full' ? "开始全自动制作" : "创建项目" }}
           </button>
         </div>
       </form>

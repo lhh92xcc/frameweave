@@ -74,32 +74,34 @@ const stageName = computed(
 );
 const stateTitle = computed(() => {
   const titles: Record<string, string> = {
-    disabled: "自动推进已关闭",
+    disabled: "自动制作已关闭",
     paused: "项目已暂停",
     cancelled: "项目已取消",
-    running: "自动推进进行中",
+    running: "正在制作",
     queued: "任务等待执行",
     scheduling: "正在准备下一步",
-    attention: "自动推进等待处理",
-    error: "自动推进无法安排下一步",
-    review: "等待人工审核",
+    attention: "制作已停下，需要处理",
+    retrying: "检查未通过，系统会自动重试",
+    error: "暂时无法继续制作",
+    review: "等待检查结果",
     rework: "等待返工",
-    completed: "生产流程已完成",
+    completed: "全部制作已完成",
   };
   return titles[state.value] || "自动推进状态未知";
 });
 const stateDescription = computed(() => {
   const descriptions: Record<string, string> = {
-    disabled: "已提交的任务仍会按队列执行；开启自动推进后才会安排后续步骤。",
+    disabled: props.project.production_mode === 'full' ? "已停止后续自动请求；已经提交到供应商的任务仍可能完成。" : "已提交的任务仍会按队列执行；开启自动推进后才会安排后续步骤。",
     paused: "已提交的模型请求可能继续完成，后续任务等待恢复。",
     cancelled: "项目已停止；恢复后可继续处理任务。",
-    running: "正在执行已提交的任务，完成后仍需人工审核。",
+    running: props.project.production_mode === 'full' ? "正在制作并自动检查，合格后会继续下一步，无需手动批准。" : "正在执行已提交的任务，完成后请检查结果。",
     queued: "任务已入队，等待工作线程执行。",
     scheduling: `等待工作线程安排${stageName.value}。`,
-    attention: "本阶段有任务失败、等待处理或已取消；请查看原因并手动重试。",
+    attention: props.project.production_mode === 'full' ? "请查看下方原因，补齐账号、原参考或录音后继续。请求结果不明时，先核对供应商记录。" : "本阶段有任务失败、等待处理或已取消；请查看原因并重试。",
+    retrying: "系统会沿用固定参考和已完成结果，按检查意见继续制作，无需点重试。",
     error: automation.value?.error?.message || "请检查项目配置后重试安排。",
-    review: `${stageName.value}已准备好，请审核后继续。`,
-    rework: `${stageName.value}有结果被标记为需返工，请重新生成或上传后审核。`,
+    review: props.project.production_mode === 'full' ? `${stageName.value}正在等待系统检查，合格后自动继续。` : `${stageName.value}已准备好，请检查后继续。`,
+    rework: props.project.production_mode === 'full' ? `${stageName.value}需要返工，系统会沿用固定参考继续处理。` : `${stageName.value}有结果被标记为需返工，请重新生成或上传后审核。`,
     completed: "所有制作阶段均已通过审核。",
   };
   return descriptions[state.value] || "请刷新页面查看最新状态。";
@@ -203,7 +205,7 @@ async function retryScheduling() {
     <div class="activity-heading">
       <div>
         <h2>生产进度</h2>
-        <p>状态自动更新 · 生成成功不等于审核通过</p>
+        <p>{{ project.production_mode === 'full' ? '自动更新 · 系统检查合格后继续' : '自动更新 · 查看已完成内容和需要处理的问题' }}</p>
       </div>
       <button class="text-button" @click="emit('jobs')">
         查看全部生成队列 <Icon name="right" :size="14" />
@@ -230,7 +232,7 @@ async function retryScheduling() {
         class="text-button"
         @click="emit('review', automation.stage)"
       >
-        {{ state === "review" ? "前往审核" : "前往处理" }}
+        {{ project.production_mode === 'full' ? '查看检查进度' : state === "review" ? "前往审核" : "前往处理" }}
       </button>
       <button
         v-if="state === 'error'"

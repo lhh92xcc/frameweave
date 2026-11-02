@@ -7,6 +7,7 @@ import ArtifactSource from "./ArtifactSource.vue";
 import ArtifactVersions from "./ArtifactVersions.vue";
 import ReferenceOverview from "./ReferenceOverview.vue";
 import ProjectActivity from "./ProjectActivity.vue";
+import ProductionOverview from "./ProductionOverview.vue";
 import PanelLoading from "./PanelLoading.vue";
 const MediaDetail = defineAsyncComponent(() => import("./MediaDetail.vue"));
 const AudioCastPanel = defineAsyncComponent({ loader: () => import("./AudioCastPanel.vue"), loadingComponent: PanelLoading });
@@ -56,6 +57,8 @@ const stage = ref("requirements"),
   extraReferences = ref<string[]>([]),
   previousShot = ref(""),
   editShot = ref<any>(null),
+  mixEpisode = ref<any>(null),
+  mixJson = ref(""),
   planJson = ref(""),
   showJson = ref(false),
   sourceOpen = ref(false),
@@ -65,6 +68,7 @@ const stage = ref("requirements"),
   batchError = ref(""),
   batchProgress = ref(""),
   viewedArtifactIds = ref<Record<string, string>>({});
+const showDetails = ref(props.project.production_mode !== 'full');
 watch(
   () => props.project.contract.markdown,
   (v, old) => {
@@ -98,6 +102,7 @@ const stageDescription: Record<string, string> = {
   reference: "为人物、场景和道具建立稳定的身份，再把它们带进每一帧。",
   keyframe: "让每个镜头从一张经过确认的画面开始。",
   video: "从批准的关键帧出发，让动作、运镜与情绪自然发生。",
+  audio: "每句台词单独配音，始终使用同一角色的固定声音。字幕跟随分镜时间线生成。",
   render: "核对完整时间线，把已批准的镜头织成一集作品。",
 };
 const activeKind = computed(() =>
@@ -327,11 +332,29 @@ async function automate() {
       }),
     p.value.automation
       ? "已关闭自动推进"
-      : "已开启自动生产，将在需要审核的阶段等待你确认。",
+      : p.value.production_mode === 'full' ? "已继续全自动制作" : "已开启逐步制作，在审核点等待确认。",
   );
+}
+function openEpisodeMix() {
+  if (!episode.value) return;
+  mixEpisode.value = episode.value;
+  mixJson.value = JSON.stringify({ bgm_artifact_id: episode.value.bgm_artifact_id || null, sound_effects: episode.value.sound_effects || [], danmaku: episode.value.danmaku || [] }, null, 2);
+}
+async function saveEpisodeMix() {
+  try {
+    const value = JSON.parse(mixJson.value);
+    const plan = JSON.parse(JSON.stringify(p.value.plan));
+    const target = plan.episodes.find((e:any) => e.id === mixEpisode.value.id);
+    Object.assign(target, value);
+    await action(() => api('/projects/' + p.value.id + '/plan', 'PUT', {plan, expected_revision:p.value.plan_revision}), '后期时间轴已保存，请重新审核分镜。');
+    if (!error.value) mixEpisode.value = null;
+  } catch(e:any) { error.value = e.message; }
 }
 function openEdit(shot: any) {
   editShot.value = JSON.parse(JSON.stringify(shot));
+  editShot.value.speech_start ??= 0;
+  editShot.value.speech_end ??= shot.duration;
+  editShot.value.vidu ||= { family: "auto", preference: "default", audio: false, bgm: false, reference_previous_video: false };
 }
 async function saveShot() {
   const plan = JSON.parse(JSON.stringify(p.value.plan));
@@ -476,7 +499,7 @@ async function reviewSelected(approved: boolean) {
             {{ project.duration }}s / 集</span
           >
         </div>
-        <p class="muted">{{ stageDescription[stage] }}</p>
+        <p class="muted">{{ project.production_mode === 'full' ? '查看制作进度，完成后下载作品；需要调整时展开制作细节。' : stageDescription[stage] }}</p>
       </div>
       <div class="button-row">
         <button v-if="project.plan" class="btn secondary" @click="voiceCastOpen = true"><Icon name="audio" :size="16" />角色配音</button>
@@ -490,13 +513,14 @@ async function reviewSelected(approved: boolean) {
           <Icon :name="project.paused ? 'play' : 'pause'" :size="16" />{{
             project.paused ? "恢复" : "暂停"
           }}</button
-        ><button class="btn primary" :disabled="busy" @click="automate">
+        ><button class="btn secondary" :disabled="busy" @click="automate">
           <Icon :name="project.automation ? 'pause' : 'wand'" :size="17" />{{
-            project.automation ? "停止自动推进" : "自动生产"
+            project.automation ? "关闭自动制作" : project.production_mode === 'full' ? "继续全自动" : "逐步制作"
           }}
         </button>
       </div>
     </div>
+    <ProductionOverview :project="project" :reload="props.reload" @details="showDetails = !showDetails" @notify="emit('notify', $event)" />
     <div v-if="project.import_summary" class="notice archive-notice">
       <Icon name="folder" :size="22" />
       <div>
@@ -527,8 +551,10 @@ async function reviewSelected(approved: boolean) {
       @notify="emit('notify', $event)"
       @settings="emit('settings')"
       @jobs="emit('jobs')"
-      @review="stage = $event === 'audio' ? 'video' : $event"
+      @review="showDetails = true; stage = $event"
     />
+    <button class="text-button detail-toggle" :aria-expanded="showDetails" @click="showDetails = !showDetails">{{ showDetails ? '收起制作细节' : '展开方案、分镜与全部素材' }}<Icon :name="showDetails ? 'up' : 'chevron'" :size="15" /></button>
+    <template v-if="showDetails">
     <div class="pipeline-steps">
       <button
         v-for="(s, i) in project.progress"
@@ -556,7 +582,7 @@ async function reviewSelected(approved: boolean) {
           ><small>{{
             s.total ? s.done + " / " + s.total + " 已批准" : "等待上一步"
           }}</small></span
-        ><Icon v-if="i < 5" class="step-arrow" name="chevron" :size="16" />
+        ><Icon v-if="i < project.progress.length - 1" class="step-arrow" name="chevron" :size="16" />
       </button>
     </div>
     <div v-if="error" class="inline-error workspace-error" role="alert">
@@ -572,7 +598,7 @@ async function reviewSelected(approved: boolean) {
         <div class="button-row">
           <span class="document-icon"><Icon name="file" /></span>
           <div>
-            <b>production-requirements.md</b
+            <b>制作要求与固定设定</b
             ><small class="block muted"
               >版本 {{ project.contract.revision }} · SHA-256
               {{ project.contract.hash.slice(0, 10) }}…</small
@@ -720,6 +746,7 @@ async function reviewSelected(approved: boolean) {
         </div>
         <div v-if="episode" class="episode-summary">
           <b>{{ episode.title }}</b>
+          <button class="btn secondary small-btn" @click="openEpisodeMix">BGM、音效与弹幕时间轴</button>
           <p>{{ episode.synopsis }}</p>
           <span
             >来源章节：{{ episode.source_chapters.join("、") }} ·
@@ -761,6 +788,7 @@ async function reviewSelected(approved: boolean) {
                 {{ shot.title }} <code>{{ shot.id }}</code>
               </h3>
               <p>{{ shot.description }}</p>
+              <span class="badge neutral">Vidu：{{ shot.vidu?.reference_previous_video ? 'Q2-Pro · 视频参考' : shot.vidu?.audio || shot.duration > 10 ? 'Q3 · 硬条件' : shot.vidu?.bgm ? 'Q2 · 背景音乐' : shot.vidu?.family === 'q2' ? 'Q2' : shot.vidu?.family === 'q3' ? 'Q3' : '自动分流' }}</span>
               <div v-if="shot.dialogue || shot.narration" class="shot-dialogue">
                 {{ shot.dialogue ? "对白" : "旁白" }}：{{
                   shot.dialogue || shot.narration
@@ -1109,7 +1137,9 @@ async function reviewSelected(approved: boolean) {
             : 'image/png,image/jpeg,image/webp'
       "
       @change="upload"
-    /><MediaDetail
+    />
+    </template>
+    <MediaDetail
       v-if="detail"
       :artifact="detail"
       :review-allowed="readyForMedia"
@@ -1150,6 +1180,16 @@ async function reviewSelected(approved: boolean) {
         <button class="btn primary" :disabled="busy" @click="saveReferences">保存参考绑定</button>
       </section>
     </div>
+    <div v-if="mixEpisode" class="modal-backdrop" @click.self="mixEpisode = null">
+      <section class="modal edit-modal" role="dialog" aria-modal="true" aria-label="后期时间轴">
+        <h2>{{ mixEpisode.title }} · 后期时间轴</h2>
+        <p>默认无 BGM、无音效、无弹幕。可填写已批准音频素材 ID；时间以本集开始为 0 秒。保存后须重新审核分镜。</p>
+        <p class="muted small">sound_effects：[{"artifact_id":"art_…","time":1.2,"volume":0.7}]；danmaku：[{"start":1.5,"duration":5,"text":"来了！","color":"#FFFFFF"}]。空数组按规则跳过。</p>
+        <label class="field">本集后期配置 JSON<textarea v-model="mixJson" rows="16" /></label>
+        <p v-if="error" class="inline-error">{{error}}</p>
+        <div class="button-row"><button class="btn secondary" @click="mixEpisode = null">关闭</button><button class="btn primary" :disabled="busy" @click="saveEpisodeMix">保存时间轴</button></div>
+      </section>
+    </div>
     <div v-if="editShot" class="modal-backdrop" @click.self="editShot = null">
       <section
         class="modal edit-modal"
@@ -1185,6 +1225,17 @@ async function reviewSelected(approved: boolean) {
         ><label class="field"
           >动态视频提示词<textarea v-model="editShot.video_prompt" rows="3" />
         </label>
+        <fieldset>
+          <legend>本镜 Vidu Q2 / Q3 分流</legend>
+          <div class="form-grid">
+            <label class="field">模型家族<select v-model="editShot.vidu.family"><option value="auto">自动按硬条件选择</option><option value="q2">Q2</option><option value="q3">Q3</option></select></label>
+            <label class="field">业务偏好<select v-model="editShot.vidu.preference"><option value="default">沿用全局无约束默认</option><option value="speed">速度优先 · Turbo</option><option value="quality">细节与可控性 · Pro</option><option value="budget">预算优先 · 无硬限制时 Q2 标准</option></select></label>
+          </div>
+          <label class="inline-checkbox"><input type="checkbox" v-model="editShot.vidu.reference_previous_video" />用同集上一镜已批准视频作片段参考（必须 Q2-Pro，最多 10 秒）</label>
+          <label class="inline-checkbox"><input type="checkbox" v-model="editShot.vidu.audio" :disabled="editShot.vidu.bgm" />生成同步声音 audio（必须 Q3）</label>
+          <label class="inline-checkbox"><input type="checkbox" v-model="editShot.vidu.bgm" :disabled="editShot.vidu.audio" />生成背景音乐 bgm（必须 Q2）</label>
+          <p class="muted small">默认不开声音，沿用锁定人声和猫叫。启用 audio 会生成供应商声音，不保证与锁定声线一致。11–16 秒必须 Q3；硬条件冲突会停止，不会忽略素材。偏好不代表实时价格或质量保证。</p>
+        </fieldset>
         <div class="form-grid">
           <label class="field"
             >对白<textarea v-model="editShot.dialogue" rows="2" /></label
@@ -1192,6 +1243,13 @@ async function reviewSelected(approved: boolean) {
             >旁白<textarea v-model="editShot.narration" rows="2" />
           </label>
         </div>
+        <div class="form-grid"><label class="field">台词开始秒数（本镜内）<input type="number" min="0" step="0.1" v-model.number="editShot.speech_start" /></label><label class="field">台词结束秒数（本镜内）<input type="number" min="0.1" step="0.1" v-model.number="editShot.speech_end" /></label></div>
+        <label class="field">这句是谁说的？
+          <select v-model="editShot.speaker_id">
+            <option :value="null">未指定</option><option value="narrator">旁白</option>
+            <option v-for="role in project.plan.assets.filter((a: any) => a.kind === 'character')" :key="role.id" :value="role.id">{{ role.name }}</option>
+          </select>
+        </label>
         <div class="field">
           绑定素材
           <div class="asset-checkboxes">

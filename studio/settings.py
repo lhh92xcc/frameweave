@@ -25,13 +25,18 @@ class SettingsStore:
         for route in [*data["text"], *data["image"], *data["vision"], *data["video"], data["audio"]]:
             route["configured"] = bool(route.pop("api_key"))
             route.pop("clear_key", None)
+        moderation = data["moderation"]
+        moderation["configured"] = bool(moderation.pop("secret_id") and moderation.get("secret_key"))
+        moderation.pop("secret_key", None)
+        moderation.pop("clear_keys", None)
         return data
 
     def save(self, value: RoutingSettings):
         previous = self.get().model_dump()
         data = value.model_dump()
+        data["pipeline_revision"] = previous["pipeline_revision"] + int(data["pipeline"] != previous["pipeline"])
         def audio_signature(config):
-            return {key: config[key] for key in ("audio_mode", "voice", "speech")} | {
+            return {key: config[key] for key in ("audio_mode", "voice", "speech", "tts_resource_id")} | {
                 "audio": {key: config["audio"][key] for key in ("transport", "provider", "base_url", "model")}
             }
 
@@ -52,6 +57,12 @@ class SettingsStore:
                         {},
                     )
                     route["api_key"] = old.get("api_key")
+        for key in ("secret_id", "secret_key"):
+            if data["moderation"]["clear_keys"]:
+                data["moderation"][key] = None
+            elif not data["moderation"][key]:
+                data["moderation"][key] = previous["moderation"][key]
+        data["moderation"]["clear_keys"] = False
         checked = RoutingSettings.model_validate(data)
         temp = self.path.with_suffix(".tmp")
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

@@ -25,6 +25,10 @@ def specs():
             if line.startswith("FRAMEWEAVE_GATEWAY_PORT="):
                 port_value = line.partition("=")[2].strip().strip("\"'")
     gateway_port = int(port_value or "8766")
+    studio_port = int(os.environ.get("FRAMEWEAVE_STUDIO_PORT", "8787"))
+    engine_port = int(os.environ.get("FRAMEWEAVE_ENGINE_PORT", "8767"))
+    if any(not 1024 <= port <= 65535 for port in (studio_port, engine_port)):
+        raise ValueError("工作台与媒体引擎端口必须为 1024–65535")
     if not 1024 <= gateway_port <= 65535:
         raise ValueError("FRAMEWEAVE_GATEWAY_PORT 必须为 1024–65535")
     ffmpeg_paths = [Path("/opt/homebrew/opt/ffmpeg-full/bin"), Path("/usr/local/opt/ffmpeg-full/bin")]
@@ -38,6 +42,7 @@ def specs():
         PATH=runtime_path,
         FRAMEWEAVE_GATEWAY_PORT=str(gateway_port),
         FRAMEWEAVE_GATEWAY=os.environ.get("FRAMEWEAVE_GATEWAY", f"http://127.0.0.1:{gateway_port}"),
+        FRAMEWEAVE_ENGINE=os.environ.get("FRAMEWEAVE_ENGINE", f"http://127.0.0.1:{engine_port}"),
     )
     engine_env = dict(env, PYTHONPATH=str(ROOT / "upstream/ai-video-generation") + os.pathsep + str(ROOT))
     gateway_env = dict(
@@ -59,11 +64,11 @@ def specs():
             "engine",
             ROOT / "upstream/ai-video-generation/.venv/bin/python",
             "services.engine_bridge:app",
-            8767,
+            engine_port,
             ROOT,
             engine_env,
         ),
-        ("studio", ROOT / ".venv/bin/python", "studio.api:app", 8787, ROOT, env),
+        ("studio", ROOT / ".venv/bin/python", "studio.api:app", studio_port, ROOT, env),
     ], bind
 
 
@@ -153,7 +158,7 @@ def start(foreground=False):
             time.sleep(0.3)
         else:
             raise RuntimeError("Services did not become ready. Inspect .local/logs/*.log")
-        print(f"FrameWeave: http://127.0.0.1:8787\nWeb2API: http://127.0.0.1:{specifications[0][3]}")
+        print(f"FrameWeave: http://127.0.0.1:{specifications[2][3]}\nWeb2API: http://127.0.0.1:{specifications[0][3]}")
         if foreground:
 
             def shutdown(signum, frame):

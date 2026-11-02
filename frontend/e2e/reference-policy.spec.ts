@@ -14,10 +14,10 @@ test("offline strict references: retain story, explicit reapproval and missing-v
   const base = `/api/projects/${original.id}`;
   expect((await request.post(base + "/contract/approve", { data: { hash: original.contract.hash } })).ok()).toBeTruthy();
   const plan = {
-    assets: [{ id: "lin", name: "离线修理师", kind: "character", description: "穿深蓝工装的修理师", prompt: "修理师标准参考" }],
+    assets: [{ id: "lin", name: "离线修理师", kind: "character", description: "穿深蓝工装的修理师", prompt: "修理师标准参考", speech_source: "system" }],
     episodes: [{ id: "ep1", title: "灯塔", synopsis: "修理师读信", source_chapters: [1], shots: [{
       id: "s01", title: "读信", description: "修理师在灯塔读信", image_prompt: "灯塔室内读信", video_prompt: "修理师打开信",
-      duration: 10, dialogue: "信到了。", narration: "", asset_ids: ["lin"],
+      duration: 10, dialogue: "信到了。", narration: "", asset_ids: ["lin"], speaker_id: null,
     }] }],
   };
   expect((await request.put(base + "/plan", { data: { plan, expected_revision: 0 } })).ok()).toBeTruthy();

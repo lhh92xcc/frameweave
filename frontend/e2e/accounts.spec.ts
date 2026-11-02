@@ -159,7 +159,11 @@ test("offline: add multiple Gemini accounts without exposing saved credentials",
   await expect(card.getByText("已保存，待检查")).toHaveCount(2);
   await expect(card.getByText("Gemini 账号 1")).toBeVisible();
   await expect(card.getByText("Gemini 账号 2")).toBeVisible();
-  expect(fixture.calls.filter((call) => call.path.includes("accounts")).map((call) => [call.method, call.path])).toEqual([
+  expect(
+    fixture.calls
+      .filter((call) => call.path.includes("accounts"))
+      .map((call) => [call.method, call.path]),
+  ).toEqual([
     ["POST", "/api/gateway/accounts"],
     ["POST", "/api/gateway/accounts"],
   ]);
@@ -167,11 +171,14 @@ test("offline: add multiple Gemini accounts without exposing saved credentials",
   await expect(page.locator("body")).not.toContainText("offline-cookie-two");
 });
 
-test("offline: synchronize Seedream settings without exposing saved key", async ({ page }) => {
+test("offline: synchronize Seedream settings without exposing saved key", async ({
+  page,
+}) => {
   const fixture = offlineGateway();
   await mockStudio(page, fixture);
   await openConnections(page);
-  const card = page.getByRole("region", { name: "Seedream 付费兜底" });
+  await page.getByText("可选：Seedream 付费备用生图", { exact: true }).click();
+  const card = page.getByRole("group", { name: "Seedream 付费兜底" });
   await expect(card).toContainText("未配置");
   await expect(card).toContainText("所有启用账号（至少两个）均登录失效时");
   await expect(card).toContainText("状态不明或其他账号不可用不会触发");
@@ -186,9 +193,14 @@ test("offline: synchronize Seedream settings without exposing saved key", async 
   await expect(page.getByText(/Seedream.*付费/)).toBeVisible();
   await page.getByRole("button", { name: "账号与连接", exact: true }).click();
   page.once("dialog", (dialog) => dialog.accept());
+  await page.getByText("可选：Seedream 付费备用生图", { exact: true }).click();
   await card.getByRole("button", { name: "清除 Seedream 密钥" }).click();
   await expect(card).toContainText("未配置");
-  expect(fixture.calls.filter((call) => call.path === "/api/gateway/seedream").map((call) => call.method)).toEqual(["PUT", "DELETE"]);
+  expect(
+    fixture.calls
+      .filter((call) => call.path === "/api/gateway/seedream")
+      .map((call) => call.method),
+  ).toEqual(["PUT", "DELETE"]);
 });
 
 test("offline: manage each account independently and show individual failures", async ({

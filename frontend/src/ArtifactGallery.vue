@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, ref, shallowRef, watch } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  onMounted,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import {
   api,
   libraryPrimary,
@@ -11,8 +18,9 @@ import {
 import Icon from "./Icon.vue";
 import ArtifactSource from "./ArtifactSource.vue";
 import VoiceLibraryPanel from "./VoiceLibraryPanel.vue";
+import { mediaNames } from "./experience";
 const MediaDetail = defineAsyncComponent(() => import("./MediaDetail.vue"));
-const emit = defineEmits<{ notify: [message: string] }>(),
+const emit = defineEmits<{ notify: [message: string]; projects: [] }>(),
   artifacts = shallowRef<Artifact[]>([]),
   filter = ref("all"),
   includeOld = ref(false),
@@ -27,6 +35,45 @@ const projectFilter = ref(props.initialProject || ""),
   currentPage = ref(1);
 const scope = ref("current"),
   episodeFilter = ref("");
+const section = ref("media"),
+  reviewFilter = ref("all");
+function showKind(kind: string, approved = false) {
+  filter.value = kind;
+  reviewFilter.value = approved ? "approved" : "all";
+  scope.value = "current";
+  includeOld.value = false;
+  query.value = "";
+  groupFilter.value = "";
+  episodeFilter.value = "";
+}
+const available = computed(() =>
+  projectArtifacts.value.filter((a) => !a.stale && libraryPrimary(a)),
+);
+const mediaShortcuts = computed(() => [
+  {
+    kind: "render",
+    title: "下载最终成片",
+    description: "已检查通过、可以交付的视频",
+    icon: "download",
+    count: available.value.filter(
+      (a) => a.kind === "render" && a.review === "approved" && !a.archived,
+    ).length,
+  },
+  {
+    kind: "reference",
+    title: "查看人物与场景",
+    description: "后续镜头沿用的固定参考图",
+    icon: "images",
+    count: available.value.filter((a) => a.kind === "reference").length,
+  },
+  {
+    kind: "audio",
+    title: "查找配音与录音",
+    description: "台词、旁白和已有猫叫录音",
+    icon: "audio",
+    count: available.value.filter((a) => a.kind === "audio").length,
+  },
+]);
 const selectedProject = computed(() =>
   props.projects?.find((p) => p.id === projectFilter.value),
 );
@@ -118,6 +165,8 @@ const filtered = computed(() =>
         (!episodeFilter.value ||
           a.metadata?.curation?.episode === episodeFilter.value) &&
         (filter.value === "all" || a.kind === filter.value) &&
+        (reviewFilter.value === "all" ||
+          (a.review === reviewFilter.value && !a.archived)) &&
         (!projectFilter.value || a.project_id === projectFilter.value) &&
         (!groupFilter.value ||
           a.metadata?.imported?.group === groupFilter.value) &&
@@ -155,7 +204,16 @@ watch(
   (value) => (projectFilter.value = value || ""),
 );
 watch(
-  [filter, includeOld, projectFilter, groupFilter, query, scope, episodeFilter],
+  [
+    filter,
+    reviewFilter,
+    includeOld,
+    projectFilter,
+    groupFilter,
+    query,
+    scope,
+    episodeFilter,
+  ],
   () => (currentPage.value = 1),
 );
 watch(projectFilter, () => {
@@ -166,8 +224,11 @@ async function load() {
   if (pendingLoad) return pendingLoad;
   const request = loadNow();
   pendingLoad = request;
-  try { await request; }
-  finally { if (pendingLoad === request) pendingLoad = null; }
+  try {
+    await request;
+  } finally {
+    if (pendingLoad === request) pendingLoad = null;
+  }
 }
 async function loadNow() {
   loading.value = true;
@@ -187,9 +248,9 @@ onMounted(load);
   <main class="gallery-content">
     <div class="page-intro">
       <div>
-        <div class="eyebrow">YOUR VISUAL LIBRARY</div>
-        <h1>让每一份素材，都有来处。</h1>
-        <p>参考图、关键帧、视频与成片，按项目和规范版本留存。</p>
+        <div class="eyebrow">素材库</div>
+        <h1>找成片、图片和声音，都在这里</h1>
+        <p>想下载作品，先选“最终成片”；想查看人物形象，选“人物与场景参考”。</p>
       </div>
       <div class="button-row">
         <a
@@ -203,201 +264,277 @@ onMounted(load);
         </button>
       </div>
     </div>
-    <VoiceLibraryPanel />
-    <div v-if="hasCuration" class="curation-summary notice">
-      <div>
-        <strong>当前制作素材：选定参考与待复核候选</strong>
-        <p>
-          当前 {{ scopeCounts.current }} 份：{{ scopeCounts.reference }}
-          份选定参考、
-          {{ scopeCounts.candidate }}
-          份待复核候选。待复核不等于废弃，也不等于制作批准；
-          {{ scopeCounts.repair }} 份明确返修另列，旧试片与历史文件分开保存。
-        </p>
-      </div>
-    </div>
-    <div v-if="hasCuration" class="curation-tabs" aria-label="素材用途">
+    <div class="plain-tabs library-sections" aria-label="素材与声音">
       <button
-        v-for="[key, label] in scopes"
-        :key="key"
-        :class="['btn', scope === key ? 'primary' : 'secondary']"
-        @click="scope = key"
+        :class="{ selected: section === 'media' }"
+        :aria-pressed="section === 'media'"
+        @click="section = 'media'"
       >
-        {{ label }} <span>{{ scopeCounts[key] }}</span>
+        图片、视频与录音
+      </button>
+      <button
+        :class="{ selected: section === 'voices' }"
+        :aria-pressed="section === 'voices'"
+        @click="section = 'voices'"
+      >
+        已保存的角色声音
       </button>
     </div>
-    <div class="archive-filters">
-      <label
-        >项目<select v-model="projectFilter" aria-label="按项目筛选素材">
-          <option value="">全部项目</option>
-          <option v-for="[id, title] in projects" :key="id" :value="id">
-            {{ title }}
-          </option>
-        </select></label
-      >
-      <label v-if="episodes.length"
-        >集数<select v-model="episodeFilter" aria-label="按集数筛选素材">
-          <option value="">全部集数 / 人物场景基准</option>
-          <option
-            v-for="episode in episodes"
-            :key="episode.id"
-            :value="episode.id"
-          >
-            {{ episode.id }} · {{ episode.title }}（已生成
-            {{ episode.generated }} / 10）
-          </option>
-        </select></label
-      >
-      <label v-if="groups.length"
-        >来源分组<select v-model="groupFilter" aria-label="按来源分组筛选">
-          <option value="">全部来源</option>
-          <option v-for="group in groups" :key="group">{{ group }}</option>
-        </select></label
-      >
-      <label
-        >搜索<input
-          v-model="query"
-          aria-label="搜索历史素材"
-          placeholder="文件名、镜头编号、原始路径…"
-      /></label>
-      <span class="muted">{{ filtered.length }} 份素材</span>
-    </div>
-    <p v-if="episodeInfo" class="notice">
-      {{ episodeInfo.id }}：生成过 {{ episodeInfo.generated }} / 10 个镜头候选。
-      <span v-if="episodeInfo.missing_slots.length"
-        >未生成：{{ episodeInfo.missing_slots.join("、") }}。</span
-      >
-      选定参考 {{ episodeCounts.reference || 0 }} 张，待复核
-      {{ episodeCounts.candidate || 0 }} 张，明确返修
-      {{ episodeCounts.repair || 0 }} 张。当前列表按所选用途筛选。
-      <button
-        v-if="episodeCounts.repair && scope !== 'repair'"
-        class="btn secondary"
-        @click="scope = 'repair'"
-      >
-        查看本集返修
-      </button>
-    </p>
-    <div class="media-filters">
-      <div class="segmented">
+    <VoiceLibraryPanel v-if="section === 'voices'" />
+    <template v-else>
+      <div class="library-shortcuts">
         <button
-          v-for="kind in [
-            'all',
-            'reference',
-            'keyframe',
-            'video',
-            'audio',
-            'render',
-          ]"
-          :key="kind"
-          :class="{ selected: filter === kind }"
-          @click="filter = kind"
+          v-for="item in mediaShortcuts"
+          :key="item.kind"
+          @click="showKind(item.kind, item.kind === 'render')"
         >
-          {{ kind === "all" ? "全部素材" : stageText[kind] }}
+          <Icon :name="item.icon" :size="23" /><span
+            ><strong
+              >{{ item.title }} <b>{{ item.count }}</b></strong
+            ><small>{{ item.description }}</small></span
+          ><Icon name="right" :size="16" />
         </button>
       </div>
-      <label class="inline-checkbox"
-        ><input type="checkbox" v-model="includeOld" />包含过期版本</label
-      >
-    </div>
-    <div v-if="error" class="inline-error">{{ error }}</div>
-    <div v-if="loading && !artifacts.length" class="panel-loading" role="status">正在加载素材…</div>
-    <div v-else-if="!filtered.length" class="work-panel stage-empty">
-      <Icon name="images" :size="36" />
-      <h3>
-        {{ hasCuration ? "当前筛选下没有素材" : "每一份创作，都值得被留下。" }}
-      </h3>
-      <p>
-        {{
-          hasCuration
-            ? "可切换集数或用途查看。当前素材包含待复核候选；明确返修单列，历史版本默认排除。"
-            : "在项目中生成参考图或视频后，它们会自动收进这里。"
-        }}
-      </p>
-    </div>
-    <div v-else class="media-grid">
-      <article v-for="a in visible" :key="a.id" class="media-card">
-        <button
-          class="media-card-preview"
-          :aria-label="
-            '预览 ' +
-            (a.metadata?.curation?.display_title || a.title || a.entity_id)
-          "
-          @click="detail = a"
-        >
-          <img
-            v-if="a.mime.startsWith('image/')"
-            :src="a.thumbnail_url || a.url"
-            :alt="a.title || a.entity_id"
-            loading="lazy"
-            decoding="async"
-          /><video
-            v-else-if="a.mime.startsWith('video/')"
-            :src="a.url + '#t=0.1'"
-            preload="metadata"
-            muted
-          /><Icon v-else name="audio" :size="32" /><span
-            :class="['media-review badge', a.stale ? 'stale' : a.review]"
-            >{{
-              a.metadata?.curation?.label ||
-              (a.archived
-                ? "历史导入"
-                : a.stale
-                  ? "已过期"
-                  : statusText[a.review])
-            }}</span
-          ><span class="media-preview-overlay"
-            ><Icon name="eye" :size="26"
-          /></span>
-        </button>
-        <div class="media-card-info">
-          <h3 :title="a.title || a.entity_id">
-            {{ a.metadata?.curation?.display_title || a.title || a.entity_id }}
-          </h3>
-          <ArtifactSource :artifact="a" />
-          <p>{{ a.project_title }} · {{ stageText[a.kind] }}</p>
-          <span v-if="a.storage" class="muted small"
-            >腾讯云 COS · 原文件已校验</span
-          >
-          <span class="muted small" v-if="a.archived"
-            >{{ a.metadata?.curation?.purpose || a.metadata?.imported?.group }}
-            ·
-            {{
-              a.metadata?.imported?.shot_id || a.metadata?.imported?.role
-            }}</span
-          >
-          <span class="muted small" v-else
-            >规范 v{{ a.contract_revision }} · {{ a.route?.provider }}</span
-          >
+      <div v-if="hasCuration" class="curation-summary notice">
+        <div>
+          <strong>当前素材包含已选参考和等待检查的图片</strong>
+          <p>
+            当前 {{ scopeCounts.current }} 份：{{ scopeCounts.reference }}
+            份选定参考、
+            {{ scopeCounts.candidate }}
+            份待复核候选。等待检查的图片会保留，但还不能直接用于制作。
+            需重做、试片和旧档案可以在下方分类查找。
+          </p>
         </div>
-      </article>
-    </div>
-    <div v-if="filtered.length" class="archive-pagination">
-      <button
-        class="btn secondary"
-        :disabled="currentPage === 1"
-        @click="currentPage--"
+      </div>
+      <div v-if="hasCuration" class="curation-tabs" aria-label="素材用途">
+        <button
+          v-for="[key, label] in scopes"
+          :key="key"
+          :class="['btn', scope === key ? 'primary' : 'secondary']"
+          @click="scope = key"
+        >
+          {{ label }} <span>{{ scopeCounts[key] }}</span>
+        </button>
+      </div>
+      <div class="archive-filters">
+        <label
+          >项目<select v-model="projectFilter" aria-label="按项目筛选素材">
+            <option value="">全部项目</option>
+            <option v-for="[id, title] in projects" :key="id" :value="id">
+              {{ title }}
+            </option>
+          </select></label
+        >
+        <label v-if="episodes.length"
+          >集数<select v-model="episodeFilter" aria-label="按集数筛选素材">
+            <option value="">全部集数 / 人物场景基准</option>
+            <option
+              v-for="episode in episodes"
+              :key="episode.id"
+              :value="episode.id"
+            >
+              {{ episode.id }} · {{ episode.title }}（已生成
+              {{ episode.generated }} / 10）
+            </option>
+          </select></label
+        >
+        <label v-if="groups.length"
+          >来源分组<select v-model="groupFilter" aria-label="按来源分组筛选">
+            <option value="">全部来源</option>
+            <option v-for="group in groups" :key="group">{{ group }}</option>
+          </select></label
+        >
+        <label
+          >搜索<input
+            v-model="query"
+            aria-label="搜索历史素材"
+            placeholder="输入名称、项目或镜头编号"
+        /></label>
+        <span class="muted">{{ filtered.length }} 份素材</span>
+      </div>
+      <p v-if="episodeInfo" class="notice">
+        {{ episodeInfo.id }}：生成过 {{ episodeInfo.generated }} / 10
+        个镜头候选。
+        <span v-if="episodeInfo.missing_slots.length"
+          >未生成：{{ episodeInfo.missing_slots.join("、") }}。</span
+        >
+        选定参考 {{ episodeCounts.reference || 0 }} 张，待复核
+        {{ episodeCounts.candidate || 0 }} 张，明确返修
+        {{ episodeCounts.repair || 0 }} 张。当前列表按所选用途筛选。
+        <button
+          v-if="episodeCounts.repair && scope !== 'repair'"
+          class="btn secondary"
+          @click="scope = 'repair'"
+        >
+          查看本集返修
+        </button>
+      </p>
+      <div class="media-filters">
+        <div class="segmented">
+          <button
+            v-for="kind in [
+              'all',
+              'reference',
+              'keyframe',
+              'video',
+              'audio',
+              'render',
+            ]"
+            :key="kind"
+            :class="{ selected: filter === kind }"
+            @click="filter = kind"
+          >
+            {{ mediaNames[kind] }}
+          </button>
+        </div>
+        <label class="inline-checkbox"
+          ><input type="checkbox" v-model="includeOld" />包含过期版本</label
+        >
+        <label class="sort-control"
+          >检查状态<select
+            v-model="reviewFilter"
+            aria-label="按检查状态筛选素材"
+          >
+            <option value="all">全部状态</option>
+            <option value="approved">检查通过</option>
+            <option value="pending">等待检查</option>
+            <option value="rejected">需要重做</option>
+          </select></label
+        >
+      </div>
+      <p class="page-explainer media-help">
+        “镜头画面”是一镜开始时的静态图，“镜头视频”是单个片段；“最终成片”是已经拼接好的整集视频。旧版素材可预览下载，不能直接用于当前制作。
+      </p>
+      <div v-if="error" class="inline-error">{{ error }}</div>
+      <div
+        v-if="loading && !artifacts.length"
+        class="panel-loading"
+        role="status"
       >
-        上一页
-      </button>
-      <span
-        >第 {{ currentPage }} / {{ pageCount }} 页 · 每页
-        {{ pageSize }} 份</span
-      >
-      <button
-        class="btn secondary"
-        :disabled="currentPage >= pageCount"
-        @click="currentPage++"
-      >
-        下一页
-      </button>
-    </div>
-    <MediaDetail
-      v-if="detail"
-      :artifact="detail"
-      @close="detail = null"
-      @refresh="load"
-      @notify="emit('notify', $event)"
-    />
+        正在加载素材…
+      </div>
+      <div v-else-if="!filtered.length" class="work-panel stage-empty">
+        <Icon name="images" :size="36" />
+        <h3>
+          {{
+            filter === "render" ? "还没有符合条件的成片" : "当前筛选下没有素材"
+          }}
+        </h3>
+        <p>
+          {{
+            filter === "render"
+              ? "制作完成并检查通过后，成片会出现在这里。可以打开项目查看进度。"
+              : "可以切换项目、素材类型或检查状态。在项目中生成和导入的素材会自动收进这里。"
+          }}
+        </p>
+        <div class="button-row">
+          <button class="btn secondary" @click="showKind('all')">
+            查看全部当前素材</button
+          ><button class="text-button" @click="emit('projects')">
+            打开我的项目
+          </button>
+        </div>
+      </div>
+      <div v-else class="media-grid">
+        <article v-for="a in visible" :key="a.id" class="media-card">
+          <button
+            class="media-card-preview"
+            :aria-label="
+              '预览 ' +
+              (a.metadata?.curation?.display_title || a.title || a.entity_id)
+            "
+            @click="detail = a"
+          >
+            <img
+              v-if="a.mime.startsWith('image/')"
+              :src="a.thumbnail_url || a.url"
+              :alt="a.title || a.entity_id"
+              loading="lazy"
+              decoding="async"
+            /><video
+              v-else-if="a.mime.startsWith('video/')"
+              :src="a.url + '#t=0.1'"
+              preload="metadata"
+              muted
+            /><Icon v-else name="audio" :size="32" /><span
+              :class="['media-review badge', a.stale ? 'stale' : a.review]"
+              >{{
+                a.metadata?.curation?.label ||
+                (a.archived
+                  ? "历史导入"
+                  : a.stale
+                    ? "已过期"
+                    : statusText[a.review])
+              }}</span
+            ><span class="media-preview-overlay"
+              ><Icon name="eye" :size="26"
+            /></span>
+          </button>
+          <div class="media-card-info">
+            <h3 :title="a.title || a.entity_id">
+              {{
+                a.metadata?.curation?.display_title || a.title || a.entity_id
+              }}
+            </h3>
+            <ArtifactSource :artifact="a" />
+            <p>
+              {{ a.project_title }} ·
+              {{ mediaNames[a.kind] || stageText[a.kind] }}
+            </p>
+            <span v-if="a.storage" class="muted small"
+              >腾讯云 COS · 原文件已校验</span
+            >
+            <span class="muted small" v-if="a.archived"
+              >{{
+                a.metadata?.curation?.purpose || a.metadata?.imported?.group
+              }}
+              ·
+              {{
+                a.metadata?.imported?.shot_id || a.metadata?.imported?.role
+              }}</span
+            >
+            <span class="muted small" v-else
+              >制作要求第 {{ a.contract_revision }} 版</span
+            >
+            <a
+              class="text-button media-download"
+              :href="a.url + '?download=true'"
+              download
+              ><Icon name="download" :size="15" />{{
+                a.kind === "render" ? "下载 MP4" : "下载原文件"
+              }}</a
+            >
+          </div>
+        </article>
+      </div>
+      <div v-if="filtered.length" class="archive-pagination">
+        <button
+          class="btn secondary"
+          :disabled="currentPage === 1"
+          @click="currentPage--"
+        >
+          上一页
+        </button>
+        <span
+          >第 {{ currentPage }} / {{ pageCount }} 页 · 每页
+          {{ pageSize }} 份</span
+        >
+        <button
+          class="btn secondary"
+          :disabled="currentPage >= pageCount"
+          @click="currentPage++"
+        >
+          下一页
+        </button>
+      </div>
+      <MediaDetail
+        v-if="detail"
+        :artifact="detail"
+        @close="detail = null"
+        @refresh="load"
+        @notify="emit('notify', $event)"
+      />
+    </template>
   </main>
 </template>

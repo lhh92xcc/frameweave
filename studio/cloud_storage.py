@@ -228,6 +228,14 @@ class CosStorage:
             if not subtitle.is_relative_to(store.media) or not subtitle.is_file():
                 raise CloudStorageError("待上传的字幕文件不存在")
             refs["subtitle_storage"] = self.upload(subtitle, "application/x-subrip")
+        pipeline_refs = {}
+        for label, filename in artifact.get("metadata", {}).get("pipeline_files", {}).items():
+            path = (store.media / filename).resolve()
+            if not path.is_relative_to(store.media) or not path.is_file():
+                raise CloudStorageError("流水线中间文件不存在或路径无效")
+            pipeline_refs[label] = self.upload(path)
+        if pipeline_refs:
+            refs["pipeline_storage"] = pipeline_refs
         # Preserve a review made while the network upload was running.
         with store.db() as db:
             db.execute("BEGIN IMMEDIATE")

@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from studio.pipeline_rules import PipelineRules
+
 REFERENCE_ROLES = {
     "character": {"general", "front", "side", "left", "right", "back", "full_body", "detail", "costume", "accessory"},
     "location": {"general", "wide", "reverse", "spatial"},
@@ -26,6 +28,14 @@ class ProjectCreate(StrictModel):
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16"
     language: str = Field(default="简体中文", max_length=80)
     style: str = Field(default="电影感、自然光、克制表演", max_length=1000)
+    production_mode: Literal["manual", "full"] = "manual"
+    unlimited_budget: bool = False
+
+    @model_validator(mode="after")
+    def full_authorization(self):
+        if self.production_mode == "full" and not self.unlimited_budget:
+            raise ValueError("开启全自动制作须明确同意不设费用上限")
+        return self
 
 
 class ContractEdit(StrictModel):
@@ -39,6 +49,21 @@ class Asset(StrictModel):
     kind: Literal["character", "location", "prop", "product"]
     description: str = Field(min_length=5, max_length=2000)
     prompt: str = Field(min_length=5, max_length=4000)
+    speech_source: Literal["system", "recording"] = "system"
+
+
+class ViduOptions(StrictModel):
+    family: Literal["auto", "q2", "q3"] = "auto"
+    preference: Literal["default", "speed", "quality", "budget"] = "default"
+    audio: bool = False
+    bgm: bool = False
+    reference_previous_video: bool = False
+
+    @model_validator(mode="after")
+    def compatible_audio(self):
+        if self.audio and self.bgm:
+            raise ValueError("audio 和 bgm 不能同时开启")
+        return self
 
 
 class Shot(StrictModel):
@@ -51,6 +76,29 @@ class Shot(StrictModel):
     narration: str = Field(default="", max_length=1000)
     dialogue: str = Field(default="", max_length=1500)
     asset_ids: list[str] = Field(default_factory=list, max_length=14)
+    speaker_id: str | None = Field(default=None, max_length=64)
+    vidu: ViduOptions = Field(default_factory=ViduOptions)
+    speech_start: float = Field(default=0, ge=0, le=600, allow_inf_nan=False)
+    speech_end: float | None = Field(default=None, gt=0, le=600, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def speech_interval(self):
+        if self.speech_end is not None and self.speech_end <= self.speech_start:
+            raise ValueError("台词结束时间必须晚于开始时间")
+        return self
+
+
+class SoundEffect(StrictModel):
+    artifact_id: str = Field(pattern=r"^art_[a-f0-9]{20}$")
+    time: float = Field(ge=0, le=3600, allow_inf_nan=False)
+    volume: float = Field(default=0.7, ge=0, le=2, allow_inf_nan=False)
+
+
+class DanmakuCue(StrictModel):
+    start: float = Field(ge=0, le=3600, allow_inf_nan=False)
+    duration: float | None = Field(default=None, gt=0, le=60, allow_inf_nan=False)
+    text: str = Field(min_length=1, max_length=500)
+    color: str = Field(default="#FFFFFF", pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 class Episode(StrictModel):
@@ -59,6 +107,9 @@ class Episode(StrictModel):
     synopsis: str = Field(min_length=5, max_length=3000)
     source_chapters: list[int] = Field(min_length=1)
     shots: list[Shot] = Field(min_length=1, max_length=120)
+    bgm_artifact_id: str | None = Field(default=None, pattern=r"^art_[a-f0-9]{20}$")
+    sound_effects: list[SoundEffect] = Field(default_factory=list, max_length=200)
+    danmaku: list[DanmakuCue] = Field(default_factory=list, max_length=500)
 
 
 class ProductionPlan(StrictModel):
@@ -78,6 +129,9 @@ class ProductionPlan(StrictModel):
                     raise ValueError(f"{shot.id} 引用了不存在的素材")
                 if len(shot.asset_ids) != len(set(shot.asset_ids)):
                     raise ValueError("分镜不能重复绑定素材")
+                characters = {a.id for a in self.assets if a.kind == "character"}
+                if shot.speaker_id and shot.speaker_id not in characters | {"narrator"}:
+                    raise ValueError("说话者必须是已定义角色或 narrator")
         return self
 
 
@@ -121,6 +175,7 @@ class VoiceProfile(SpeechControls):
     voice_id: str = Field(min_length=1, max_length=160)
     library_id: str | None = Field(default=None, pattern=r"^voice_[a-f0-9]{20}$")
     source: Literal["recording"] | None = None
+    recording_artifact_id: str | None = Field(default=None, pattern=r"^art_[a-f0-9]{20}$")
 
 
 class AudioCast(StrictModel):
@@ -129,7 +184,21 @@ class AudioCast(StrictModel):
     expected_version: int = Field(ge=0)
 
 
+class ModerationSettings(StrictModel):
+    configured: bool = Field(default=False, exclude=True)
+    enabled: bool = False
+    biz_type: str = Field(default="", max_length=128)
+    region: str = Field(default="ap-guangzhou", pattern=r"^[a-z][a-z0-9-]+$")
+    secret_id: str | None = Field(default=None, max_length=8192, repr=False)
+    secret_key: str | None = Field(default=None, max_length=8192, repr=False)
+    clear_keys: bool = False
+
+
 class RoutingSettings(StrictModel):
+    moderation: ModerationSettings = Field(default_factory=ModerationSettings)
+    tts_resource_id: str = Field(default="seed-tts-2.0", min_length=1, max_length=128)
+    pipeline: PipelineRules = Field(default_factory=PipelineRules)
+    pipeline_revision: int = Field(default=0, ge=0)
     allow_paid: bool = False
     text: list[Route] = Field(default_factory=lambda: [Route()], min_length=1, max_length=6)
     image: list[Route] = Field(
@@ -139,7 +208,7 @@ class RoutingSettings(StrictModel):
     image_qc_attempts: int = Field(default=3, ge=1, le=5)
     image_qc_budget_cny: float = Field(default=0, ge=0, le=100000, allow_inf_nan=False)
     video: list[Route] = Field(
-        default_factory=lambda: [Route(provider="jimeng-web", model="jimeng-seedance-2.0-mini")],
+        default_factory=lambda: [Route(transport="cloud", provider="tokenhub-vidu", model="auto", base_url="https://tokenhub.tencentmaas.com")],
         min_length=1,
         max_length=6,
     )
@@ -158,6 +227,15 @@ class RoutingSettings(StrictModel):
             or self.audio.model not in {"speech-2.8-turbo", "speech-2.8-hd"}
         ):
             raise ValueError("MiniMax 配音须使用官方地址 https://api.minimaxi.com/v1 和 speech-2.8 模型")
+        if self.audio.provider == "volcengine-tts" and (
+            self.audio.transport != "cloud" or self.audio.base_url != "https://openspeech.bytedance.com"
+        ):
+            raise ValueError("火山 TTS 必须使用官方地址 https://openspeech.bytedance.com")
+        for route in [*self.text, *self.vision]:
+            if route.provider == "volcengine-ark" and (
+                route.transport != "cloud" or route.base_url != "https://ark.cn-beijing.volces.com/api/v3"
+            ):
+                raise ValueError("豆包方舟必须使用官方北京 API 地址")
         return self
 
 
@@ -197,3 +275,11 @@ class PlanEdit(StrictModel):
 
 class RunRequest(StrictModel):
     enabled: bool = True
+    mode: Literal["manual", "full"] | None = None
+    unlimited_budget: bool = False
+
+    @model_validator(mode="after")
+    def full_authorization(self):
+        if self.enabled and self.mode == "full" and not self.unlimited_budget:
+            raise ValueError("开启全自动制作须明确同意不设费用上限")
+        return self

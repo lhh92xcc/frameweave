@@ -83,7 +83,11 @@ async function prompt() {
               ? "已过期"
               : statusText[artifact.review])
         }}</span>
+        <div v-if="artifact.metadata?.warnings?.length || artifact.metadata?.timeline_warning || artifact.metadata?.degraded" class="notice warning">
+          <strong>制作异常 / 时间轴处理</strong><p v-if="artifact.metadata?.degraded">按规则使用异常静音候选，不能当作正常配音。</p><p v-if="artifact.metadata?.timeline_warning">{{artifact.metadata.timeline_warning}}</p><ul><li v-for="(warning,index) in artifact.metadata?.warnings || []" :key="index">{{warning}}</li></ul>
+        </div>
         <dl class="metadata-list">
+          <template v-if="artifact.metadata?.billing"><dt>模型计费分组</dt><dd>{{artifact.metadata.billing.model_group}}</dd><dt>供应商积分</dt><dd>{{artifact.metadata.billing.credits ?? '未返回'}}</dd><dt>按配置价格估算</dt><dd>{{artifact.metadata.billing.estimated_cost ?? '未知'}} {{artifact.metadata.billing.currency}}（非供应商账单）</dd></template>
           <template v-if="artifact.storage">
             <dt>素材存储</dt>
             <dd>腾讯云 COS · 已完整读回校验</dd>

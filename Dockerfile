@@ -17,6 +17,7 @@ COPY upstream/web2api-web/requirements.txt upstream/web2api-web/
 RUN uv venv .local/gateway-venv && uv pip install --python .local/gateway-venv/bin/python -r upstream/web2api-web/requirements.txt
 # Keep dependency environment outside the data volume.
 RUN mv .local/gateway-venv /opt/frameweave-gateway-venv
+COPY docs/PRODUCTION_PIPELINE_RULES.md docs/PRODUCTION_PIPELINE_RULES.md
 COPY studio/ studio/
 COPY services/ services/
 COPY scripts/ scripts/

@@ -28,6 +28,8 @@ docker --context orbstack compose down
 
 修改本机路径可设置 `FRAMEWEAVE_DATA`；修改内部服务地址可设置 `FRAMEWEAVE_GATEWAY` 与 `FRAMEWEAVE_ENGINE`。网关端口默认 8766；若被其他项目占用，在本机忽略提交的 `.env` 写入 `FRAMEWEAVE_GATEWAY_PORT=8786` 后重启。OrbStack 只调整宿主机映射，容器内部保持 8766；原生启动器也读取这个端口字段。扩展控制台链接按实际配置显示，浏览器扩展的网关地址应相应调整。开发前端：`cd frontend && npm run dev`，代理到 8787。
 
+原生隔离验证还可通过进程环境设置 `FRAMEWEAVE_STUDIO_PORT`（默认 8787）和 `FRAMEWEAVE_ENGINE_PORT`（默认 8767）。例如在 `frontend/` 运行 `FRAMEWEAVE_STUDIO_PORT=5173 FRAMEWEAVE_ENGINE_PORT=18867 npm run test:e2e`，浏览器测试使用独立 `.local/e2e` 数据及 18866 网关，不占用生产端口，也不能与生产共享数据库。
+
 ## 任务恢复
 
 网页生成接受后保存 `remote_id`，恢复和轮询不会重新创建远端任务。每个规划子步骤使用独立幂等键。云模型成功响应先写本地回执，再处理和下载；连接中断且没有回执的提交会进入等待核对状态。核对供应商记录后才能显式重新生成。暂停不会强制取消已提交供应商请求；取消也不能保证退费。
@@ -35,3 +37,5 @@ docker --context orbstack compose down
 ## COS 持久存储
 
 COS SDK 随主应用安装并进入 OrbStack 镜像。凭据位于挂载数据卷的 `cloud-storage.json`；不要放入镜像、环境示例或公开仓库。临时下载缓存位于同一数据卷的媒体目录，使用后清理。迁移与生命周期核对见 [CLOUD_STORAGE.md](CLOUD_STORAGE.md)。上传不自动回收本地空间。
+
+运行 OrbStack/Compose 版本时，本地 `npm run build` 仅更新主机文件，不会替换运行中镜像的界面或后端。修改后执行 `docker --context orbstack compose up -d --build` 更新容器，再刷新工作台；`.local` 数据卷会保留。TokenHub 的账号与连接卡片也需要运行新版镜像才能显示。

@@ -19,6 +19,8 @@ def configure(client, *, key=SECRET, paid=True):
         for route in [settings[kind]] if kind == "audio" else settings[kind]:
             route.pop("configured", None)
     settings.update(allow_paid=paid, audio_mode="cloud", voice="cute_boy")
+    # Offline TTS protocol unit tests; the pipeline ordering is tested separately.
+    settings["pipeline"]["audio"]["post_production"] = False
     settings["audio"] = {
         "transport": "cloud", "provider": "minimax", "model": "speech-2.8-turbo",
         "base_url": "https://api.minimaxi.com/v1", "api_key": key,

@@ -1,14 +1,34 @@
 <script setup lang="ts">
-import { ref, shallowRef, computed, defineAsyncComponent, onMounted, onUnmounted } from "vue";
-import { api, libraryPrimary, type Project, type Template } from "./api";
+import {
+  ref,
+  shallowRef,
+  computed,
+  defineAsyncComponent,
+  onMounted,
+  onUnmounted,
+} from "vue";
+import { api, type Project, type Template } from "./api";
+import { deliveries, projectPercent, projectSummary } from "./experience";
 import Icon from "./Icon.vue";
 import PanelLoading from "./PanelLoading.vue";
 import { usePolling } from "./usePolling";
 const CreateProject = defineAsyncComponent(() => import("./CreateProject.vue"));
-const ProjectWorkspace = defineAsyncComponent({ loader: () => import("./ProjectWorkspace.vue"), loadingComponent: PanelLoading });
-const SettingsPanel = defineAsyncComponent({ loader: () => import("./SettingsPanel.vue"), loadingComponent: PanelLoading });
-const JobQueue = defineAsyncComponent({ loader: () => import("./JobQueue.vue"), loadingComponent: PanelLoading });
-const ArtifactGallery = defineAsyncComponent({ loader: () => import("./ArtifactGallery.vue"), loadingComponent: PanelLoading });
+const ProjectWorkspace = defineAsyncComponent({
+  loader: () => import("./ProjectWorkspace.vue"),
+  loadingComponent: PanelLoading,
+});
+const SettingsPanel = defineAsyncComponent({
+  loader: () => import("./SettingsPanel.vue"),
+  loadingComponent: PanelLoading,
+});
+const JobQueue = defineAsyncComponent({
+  loader: () => import("./JobQueue.vue"),
+  loadingComponent: PanelLoading,
+});
+const ArtifactGallery = defineAsyncComponent({
+  loader: () => import("./ArtifactGallery.vue"),
+  loadingComponent: PanelLoading,
+});
 const nav = [
   { id: "home", name: "创作概览", icon: "grid" },
   { id: "projects", name: "我的项目", icon: "folder" },
@@ -28,9 +48,21 @@ const page = ref("home"),
   toast = ref(""),
   mobileNav = ref(false);
 const libraryProject = ref("");
+const projectFilter = ref("all"),
+  projectSort = ref("recent");
+const projectFilters = [
+  { id: "all", label: "全部项目" },
+  { id: "working", label: "正在制作" },
+  { id: "attention", label: "需要处理" },
+  { id: "ready", label: "已有成片" },
+  { id: "draft", label: "待继续" },
+  { id: "paused", label: "已暂停或停止" },
+];
 let toastTimer: ReturnType<typeof setTimeout>;
 let pendingRefresh: Promise<void> | null = null;
-let listUpdatedAt = 0, healthUpdatedAt = 0, projectRequest = 0;
+let listUpdatedAt = 0,
+  healthUpdatedAt = 0,
+  projectRequest = 0;
 const titles: Record<string, string> = {
   home: "创作概览",
   projects: "我的项目",
@@ -45,29 +77,45 @@ const running = computed(
       .flatMap((p) => p.jobs)
       .filter((j) => ["running", "queued"].includes(j.status)).length,
 );
-const artifactsCount = computed(() =>
-  projects.value.reduce(
-    (n, p) =>
-      n + p.artifacts.filter((a) => !a.stale && libraryPrimary(a)).length,
-    0,
-  ),
-);
 const filtered = computed(() =>
-  projects.value.filter((p) =>
-    p.title.toLowerCase().includes(query.value.toLowerCase()),
+  projects.value
+    .filter(
+      (p) =>
+        p.title.toLowerCase().includes(query.value.toLowerCase()) &&
+        (page.value === "home" ||
+          projectFilter.value === "all" ||
+          projectSummary(p).id === projectFilter.value),
+    )
+    .sort((a, b) =>
+      projectSort.value === "name"
+        ? a.title.localeCompare(b.title, "zh-CN")
+        : (b.updated_at || b.created_at) - (a.updated_at || a.created_at),
+    ),
+);
+const projectCounts = computed(() =>
+  Object.fromEntries(
+    projectFilters.map((f) => [
+      f.id,
+      projects.value.filter(
+        (p) => f.id === "all" || projectSummary(p).id === f.id,
+      ).length,
+    ]),
   ),
 );
-const approvedRenders = computed(
-  () =>
-    projects.value
-      .flatMap((p) => p.artifacts)
-      .filter((a) => a.kind === "render" && a.review === "approved" && !a.stale)
-      .length,
+const attentionProjects = computed(() =>
+  projects.value.filter((p) => projectSummary(p).id === "attention"),
+);
+const approvedRenders = computed(() =>
+  projects.value.reduce((n, p) => n + deliveries(p).length, 0),
 );
 function notify(message: string) {
   toast.value = message;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (toast.value = ""), 4500);
+}
+function scrollNavigation(event: KeyboardEvent) {
+  const sidebar = event.currentTarget as HTMLElement;
+  sidebar.scrollTop = event.key === "Home" ? 0 : sidebar.scrollHeight;
 }
 function navigate(id: string) {
   projectRequest++;
@@ -76,6 +124,10 @@ function navigate(id: string) {
   location.hash = id;
   if (id === "assets") libraryProject.value = "";
   if (id !== "project") selected.value = null;
+}
+function viewProjects(filter: string) {
+  projectFilter.value = filter;
+  navigate("projects");
 }
 function openLibrary(projectId: string) {
   projectRequest++;
@@ -102,7 +154,8 @@ async function refreshNow(force: boolean) {
   const selectedId = selected.value?.id;
   const navigation = projectRequest;
   const refreshList = force || Date.now() - listUpdatedAt >= 30000;
-  const refreshHealth = !healthUpdatedAt || Date.now() - healthUpdatedAt >= 30000;
+  const refreshHealth =
+    !healthUpdatedAt || Date.now() - healthUpdatedAt >= 30000;
   try {
     const [ps, h, detail] = await Promise.all([
       refreshList ? api<Project[]>("/projects") : Promise.resolve(null),
@@ -119,9 +172,15 @@ async function refreshNow(force: boolean) {
       health.value = h;
       healthUpdatedAt = Date.now();
     }
-    if (detail && selected.value?.id === selectedId && navigation === projectRequest) {
+    if (
+      detail &&
+      selected.value?.id === selectedId &&
+      navigation === projectRequest
+    ) {
       selected.value = detail;
-      projects.value = projects.value.map((project) => project.id === detail.id ? detail : project);
+      projects.value = projects.value.map((project) =>
+        project.id === detail.id ? detail : project,
+      );
     }
     error.value = "";
   } catch (e: any) {
@@ -150,7 +209,11 @@ async function created(p: Project) {
   creating.value = false;
   await refresh();
   await openProject(p);
-  notify("项目已创建。先完善制作规范，让每一帧都有依据。");
+  notify(
+    p.production_mode === "full"
+      ? "已开始全自动制作，可以随时查看进度。"
+      : "项目已创建。可查看方案，或开启全自动完成。",
+  );
 }
 async function parseHash() {
   const [id, pid] = location.hash.slice(1).split("/");
@@ -168,13 +231,19 @@ async function parseHash() {
     selected.value = null;
   }
 }
-usePolling(async () => {
-  if (!pendingRefresh) await startRefresh(false);
-}, 4000, false);
+usePolling(
+  async () => {
+    if (!pendingRefresh) await startRefresh(false);
+  },
+  4000,
+  false,
+);
 onMounted(async () => {
   try {
     await Promise.all([
-      api<Template[]>("/templates").then((value) => { templates.value = value; }),
+      api<Template[]>("/templates").then((value) => {
+        templates.value = value;
+      }),
       refresh(),
     ]);
     await parseHash();
@@ -195,6 +264,8 @@ onUnmounted(() => {
       :class="{ shown: mobileNav }"
       aria-label="工作台导航"
       tabindex="0"
+      @keydown.home.self.prevent="scrollNavigation"
+      @keydown.end.self.prevent="scrollNavigation"
     >
       <a class="brand" href="#home" @click.prevent="navigate('home')"
         ><span class="brand-mark"><i /><i /><i /></span
@@ -203,7 +274,7 @@ onUnmounted(() => {
       <button class="btn primary new-project" @click="create()">
         <Icon name="plus" />开启新创作<kbd>＋</kbd>
       </button>
-      <div class="nav-label">工作空间 <span>WORKSPACE</span></div>
+      <div class="nav-label">工作空间</div>
       <nav>
         <button
           v-for="item in nav"
@@ -246,7 +317,7 @@ onUnmounted(() => {
         <div class="workflow-note">
           <span class="note-icon"><Icon name="link" :size="17" /></span
           ><strong>从想法到成片，一路相连</strong>
-          <p>规范、素材与模型，<br />在同一条创作线上。</p>
+          <p>写清需求，开启自动制作。<br />完成后在项目里下载。</p>
           <button @click="help = true">
             了解工作流程 <Icon name="arrow" :size="14" />
           </button>
@@ -314,24 +385,28 @@ onUnmounted(() => {
         <template v-if="page === 'home'">
           <div class="page-intro">
             <div>
-              <div class="eyebrow">YOUR CREATIVE SPACE</div>
-              <h1>每个想法，都值得被看见<span class="purple">。</span></h1>
-              <p>从第一行文字，到最后一帧画面。在这里，把创作串起来。</p>
+              <div class="eyebrow">创作概览</div>
+              <h1>今天想做什么视频？</h1>
+              <p>新建作品、查看制作进度，或者下载已经做好的视频。</p>
             </div>
-            <span class="date-label">FRAME BY FRAME, IDEA BY IDEA</span>
+            <button class="text-button" @click="help = true">
+              <Icon name="help" :size="17" />第一次使用？看这三步
+            </button>
           </div>
           <section class="hero">
             <div class="hero-copy">
               <span class="hero-label"
                 ><span class="tiny-star">✧</span> 让灵感，自然成片</span
               >
-              <h2>一个想法。<br />一整个影像世界。</h2>
+              <h2>写下你的想法，<br />剩下交给全自动。</h2>
               <p>
-                导入故事、产品或灵感，建立制作规范，<br />让分镜、图像与视频沿着同一份蓝图生长。
+                小说改短剧、产品介绍、猫咪短视频。<br />一次写清要求，系统沿用固定参考，自动检查并完成制作。
               </p>
               <button class="btn dark" @click="create()">
                 开始我的创作 <Icon name="right" :size="17" /></button
-              ><span class="hero-caption">六种创作起点，无限种表达方式</span>
+              ><span class="hero-caption"
+                >填写需求 → 全自动制作 → 下载成片</span
+              >
             </div>
             <div class="hero-art" aria-label="从文本规范到分镜画面的流程示意">
               <div class="orbit orbit-one" />
@@ -339,14 +414,14 @@ onUnmounted(() => {
               <div class="art-spark one">✦</div>
               <div class="art-spark two">✧</div>
               <div class="floating-label label-one">
-                <Icon name="check" :size="13" /> 风格与角色，始终一致
+                <Icon name="check" :size="13" /> 沿用固定人物和场景参考
               </div>
               <div class="script-art">
                 <div class="script-art-top">
-                  <span><Icon name="file" :size="13" /> PRODUCTION BIBLE</span
+                  <span><Icon name="file" :size="13" /> 固定设定与制作要求</span
                   ><i />
                 </div>
-                <b>让每一帧，都有依据</b>
+                <b>先固定形象，再制作每一镜</b>
                 <div class="art-lines"><i /><i /><i /></div>
                 <div class="script-tags">
                   <span>人物设定</span><span>视觉风格</span>
@@ -382,82 +457,108 @@ onUnmounted(() => {
               <div class="hero-art-caption">流程示意 · 非模型生成结果</div>
             </div>
           </section>
-          <div class="stats-row">
-            <div class="stat">
-              <span class="stat-icon lilac"><Icon name="folder" /></span>
-              <div>
-                <span>创作项目</span
-                ><b>{{ projects.length }}<small>个</small></b>
-              </div>
-              <span class="stat-trail">每一个故事的起点</span>
-            </div>
-            <div class="stat">
-              <span class="stat-icon peach"><Icon name="clapper" /></span>
-              <div>
-                <span>生成任务</span><b>{{ running }}<small>进行中</small></b>
-              </div>
-              <button
-                class="stat-go"
-                aria-label="查看队列"
-                @click="navigate('jobs')"
-              >
-                <Icon name="arrow" />
-              </button>
-            </div>
-            <div class="stat">
-              <span class="stat-icon mint"><Icon name="images" /></span>
-              <div>
-                <span>创作素材</span
-                ><b>{{ artifactsCount }}<small>份</small></b>
-              </div>
-              <span class="stat-trail">已批准成片 {{ approvedRenders }}</span>
-            </div>
+          <div class="overview-actions" aria-label="作品状态总览">
+            <button @click="viewProjects('working')">
+              <span class="stat-icon lilac"><Icon name="clapper" /></span
+              ><span
+                ><strong>{{ projectCounts.working }} 个作品正在制作</strong
+                ><small>查看进度，自动更新</small></span
+              ><Icon name="right" :size="18" />
+            </button>
+            <button @click="viewProjects('attention')">
+              <span class="stat-icon peach"><Icon name="warning" /></span
+              ><span
+                ><strong>{{ attentionProjects.length }} 个作品需要处理</strong
+                ><small>{{
+                  attentionProjects.length
+                    ? "打开后查看原因和解决办法"
+                    : "当前没有需要处理的问题"
+                }}</small></span
+              ><Icon name="right" :size="18" />
+            </button>
+            <button @click="viewProjects('ready')">
+              <span class="stat-icon mint"><Icon name="download" /></span
+              ><span
+                ><strong>{{ approvedRenders }} 集成片可以下载</strong
+                ><small>打开已完成的作品</small></span
+              ><Icon name="right" :size="18" />
+            </button>
           </div>
-          <section>
-            <div class="section-heading">
-              <div>
-                <h2>
-                  从哪里开始？<span class="section-sub">选择一种创作方式</span>
-                </h2>
-              </div>
-              <button class="text-button" @click="help = true">
-                每种方式都能自由编排 <Icon name="arrow" :size="15" />
+          <section class="start-steps" aria-label="第一次使用">
+            <div>
+              <span>1</span><strong>连接你的模型账号</strong>
+              <p>只需首次配置，或账号失效时更新。</p>
+              <button class="text-button" @click="navigate('settings')">
+                去设置 <Icon name="right" :size="14" />
               </button>
             </div>
-            <div class="template-grid">
-              <button
-                v-for="t in templates"
-                :key="t.id"
-                :class="['template-card', t.color]"
-                @click="create(t.id)"
-              >
-                <div class="template-top">
-                  <span class="template-icon"
-                    ><Icon :name="t.icon" :size="24" /></span
-                  ><span class="template-tag">{{ t.tag }}</span>
-                </div>
-                <div class="template-en">{{ t.en }}</div>
-                <h3>{{ t.name }}</h3>
-                <p>{{ t.description }}</p>
-                <span class="template-action"
-                  >开始创作 <Icon name="right" :size="15"
-                /></span>
-                <div class="template-decoration" />
+            <div>
+              <span>2</span><strong>写清想做的视频</strong>
+              <p>导入小说，或填写人物、画面、声音和时长。</p>
+              <button class="text-button" @click="create()">
+                填写需求 <Icon name="right" :size="14" />
+              </button>
+            </div>
+            <div>
+              <span>3</span><strong>自动制作，完成后下载</strong>
+              <p>开启全自动即同意本项目不设费用上限。</p>
+              <button class="text-button" @click="navigate('projects')">
+                查看我的作品 <Icon name="right" :size="14" />
               </button>
             </div>
           </section>
+          <details class="starter-templates">
+            <summary>
+              想找点灵感？按视频类型开始 <Icon name="chevron" :size="16" />
+            </summary>
+            <section>
+              <div class="section-heading">
+                <div>
+                  <h2>
+                    从哪里开始？<span class="section-sub"
+                      >选择一种创作方式</span
+                    >
+                  </h2>
+                </div>
+                <button class="text-button" @click="help = true">
+                  不知道选哪个？看操作说明 <Icon name="arrow" :size="15" />
+                </button>
+              </div>
+              <div class="template-grid">
+                <button
+                  v-for="t in templates"
+                  :key="t.id"
+                  :class="['template-card', t.color]"
+                  @click="create(t.id)"
+                >
+                  <div class="template-top">
+                    <span class="template-icon"
+                      ><Icon :name="t.icon" :size="24" /></span
+                    ><span class="template-tag">{{ t.tag }}</span>
+                  </div>
+                  <div class="template-en">{{ t.en }}</div>
+                  <h3>{{ t.name }}</h3>
+                  <p>{{ t.description }}</p>
+                  <span class="template-action"
+                    >开始创作 <Icon name="right" :size="15"
+                  /></span>
+                  <div class="template-decoration" />
+                </button>
+              </div>
+            </section>
+          </details>
         </template>
         <section class="projects-section">
           <div class="section-heading">
             <div>
               <div v-if="page === 'projects'" class="eyebrow">
-                YOUR COLLECTION
+                所有作品都在这里
               </div>
               <h2>
                 {{ page === "home" ? "最近创作" : "我的项目" }}
                 <span class="number-chip">{{ projects.length }}</span
                 ><span v-if="page === 'home'" class="section-sub"
-                  >让未完成的灵感，继续发生</span
+                  >查看进度，继续制作或下载成片</span
                 >
               </h2>
             </div>
@@ -471,14 +572,39 @@ onUnmounted(() => {
               <Icon name="plus" :size="17" />新建项目
             </button>
           </div>
+          <p v-if="page === 'projects'" class="page-explainer">
+            每个项目是一部作品。打开查看进度、解决问题，完成后播放或下载成片。
+          </p>
+          <div v-if="page === 'projects'" class="collection-toolbar">
+            <div class="plain-tabs" aria-label="按制作状态筛选项目">
+              <button
+                v-for="f in projectFilters"
+                :key="f.id"
+                :class="{ selected: projectFilter === f.id }"
+                :aria-pressed="projectFilter === f.id"
+                @click="projectFilter = f.id"
+              >
+                {{ f.label }} <span>{{ projectCounts[f.id] }}</span>
+              </button>
+            </div>
+            <label class="sort-control"
+              >排序<select v-model="projectSort" aria-label="项目排序">
+                <option value="recent">最近更新</option>
+                <option value="name">项目名称</option>
+              </select></label
+            >
+          </div>
           <div v-if="filtered.length" class="project-grid">
-            <button
+            <article
               v-for="p in filtered.slice(0, page === 'home' ? 6 : 1000)"
               :key="p.id"
               class="project-card"
-              @click="openProject(p)"
             >
-              <div :class="['project-cover', p.mode]">
+              <button
+                :class="['project-cover', p.mode]"
+                :aria-label="`打开项目 ${p.title}`"
+                @click="openProject(p)"
+              >
                 <img
                   v-if="
                     p.artifacts.find(
@@ -488,9 +614,12 @@ onUnmounted(() => {
                   :src="
                     p.artifacts.find(
                       (a) => a.mime.startsWith('image/') && !a.stale,
-                    )!.thumbnail_url || p.artifacts.find((a) => a.mime.startsWith('image/') && !a.stale)!.url
+                    )!.thumbnail_url ||
+                    p.artifacts.find(
+                      (a) => a.mime.startsWith('image/') && !a.stale,
+                    )!.url
                   "
-                  alt="项目生成素材预览"
+                  alt="项目素材预览"
                   loading="lazy"
                   decoding="async"
                 /><template v-else
@@ -504,55 +633,88 @@ onUnmounted(() => {
                 ><span class="cover-badge"
                   >{{ p.aspect_ratio }} · {{ p.episodes_count }} 集</span
                 >
-              </div>
+              </button>
               <div class="project-card-body">
                 <span class="project-type">{{
                   templates.find((t) => t.id === p.mode)?.name
                 }}</span>
-                <h3>{{ p.title }}</h3>
-                <div class="project-progress">
-                  <i
-                    :style="{
-                      width:
-                        (p.progress.filter((s) => s.total && s.done === s.total)
-                          .length /
-                          6) *
-                          100 +
-                        '%',
-                    }"
-                  />
+                <h3>
+                  <button class="project-name" @click="openProject(p)">
+                    {{ p.title }}
+                  </button>
+                </h3>
+                <div
+                  class="project-progress"
+                  role="progressbar"
+                  :aria-label="`${p.title} 已规划内容进度`"
+                  :aria-valuenow="projectPercent(p)"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                >
+                  <i :style="{ width: projectPercent(p) + '%' }" />
                 </div>
                 <div class="project-card-meta">
-                  <span>{{
-                    p.paused
-                      ? "已暂停"
-                      : p.cancelled
-                        ? "已取消"
-                        : p.jobs.some((j) => j.status === "running")
-                          ? "正在生成"
-                          : p.contract.approved
-                            ? "制作进行中"
-                            : "待确认制作规范"
+                  <span :class="['project-state', projectSummary(p).id]">{{
+                    projectSummary(p).label
                   }}</span
-                  ><Icon name="arrow" :size="16" />
+                  ><span
+                    >{{ deliveries(p).length }} /
+                    {{ p.episodes_count }} 集成片</span
+                  >
+                </div>
+                <p class="project-next">{{ projectSummary(p).hint }}</p>
+                <div class="project-card-actions">
+                  <button
+                    class="btn secondary small-btn"
+                    @click="openProject(p)"
+                  >
+                    {{ projectSummary(p).action }}
+                    <Icon name="right" :size="14" /></button
+                  ><a
+                    v-if="deliveries(p).length"
+                    class="text-button"
+                    :href="`/api/projects/${p.id}/export.zip`"
+                    download
+                    >下载作品包</a
+                  >
                 </div>
               </div>
-            </button>
+            </article>
           </div>
           <div v-else class="empty-projects">
             <span class="empty-icon"><Icon name="folder" :size="26" /></span>
             <div>
-              <h3>{{ query ? "没有匹配的项目" : "你的故事，还差一个开始" }}</h3>
+              <h3>
+                {{
+                  query || (page === "projects" && projectFilter !== "all")
+                    ? "当前筛选下没有项目"
+                    : "还没有作品，从一个想法开始"
+                }}
+              </h3>
               <p>
                 {{
-                  query
-                    ? "试试其他关键词。"
-                    : "新建一个项目，让零散的灵感连成完整的作品。"
+                  query || projectFilter !== "all"
+                    ? "可以换个关键词，或查看全部项目。"
+                    : "上传小说或写下视频需求，创建后就能开始制作。"
                 }}
               </p>
             </div>
-            <button v-if="!query" class="btn secondary" @click="create()">
+            <button
+              v-if="!projects.length && !query"
+              class="btn secondary"
+              @click="create()"
+            >
               <Icon name="plus" :size="17" />创建第一个项目
+            </button>
+            <button
+              v-if="query || projectFilter !== 'all'"
+              class="text-button"
+              @click="
+                query = '';
+                projectFilter = 'all';
+              "
+            >
+              清除筛选
             </button>
           </div>
         </section>
@@ -574,11 +736,23 @@ onUnmounted(() => {
         @jobs="navigate('jobs')"
         @library="openLibrary"
       />
-      <SettingsPanel v-else-if="page === 'settings'" @notify="notify" />
+      <SettingsPanel
+        v-else-if="page === 'settings'"
+        @notify="notify"
+        @projects="navigate('projects')"
+      />
       <JobQueue
         v-else-if="page === 'jobs'"
+        :projects="projects"
         @notify="notify"
         @refresh="refresh"
+        @project="
+          (id) => {
+            const p = projects.find((p) => p.id === id);
+            if (p) openProject(p);
+          }
+        "
+        @settings="navigate('settings')"
       />
       <ArtifactGallery
         :projects="projects"
@@ -586,6 +760,7 @@ onUnmounted(() => {
         :key="libraryProject"
         :initial-project="libraryProject"
         @notify="notify"
+        @projects="navigate('projects')"
       />
     </div>
     <CreateProject
@@ -608,8 +783,8 @@ onUnmounted(() => {
           @click="help = false"
         >
           <Icon name="close" /></button
-        ><span class="eyebrow">A LITTLE GUIDE</span>
-        <h2 id="help-title">让创作，沿着蓝图发生。</h2>
+        ><span class="eyebrow">操作说明</span>
+        <h2 id="help-title">三步，把需求做成视频</h2>
         <p class="muted">
           首次使用，先在“模型与连接”中添加网页账号或云模型 API Key。
         </p>
@@ -621,30 +796,29 @@ onUnmounted(() => {
             </p>
           </li>
           <li>
-            <b>先确认制作规范</b>
+            <b>开启全自动制作</b>
             <p>
-              AI 整理完整的 Markdown
-              规范。编辑并批准后，每次生成都会携带这份规范。
+              新建时勾选“全自动完成”，或在项目里点击开启。开启即授权本项目不设费用上限，系统可以调用已配置的付费渠道。
             </p>
           </li>
           <li>
-            <b>分集、分镜，再建立参考图</b>
+            <b>等待完成，下载成片</b>
             <p>
-              检查故事覆盖与镜头时长，批准素材与关键帧，让身份和风格保持一致。
+              系统自动做参考图、全部镜头、配音和字幕，检查合格后合成每一集。页面会显示进度，完成后可下载
+              MP4 和全部素材。
             </p>
           </li>
           <li>
-            <b>生成视频，审核并交付</b>
+            <b>需要调整时，展开制作细节</b>
             <p>
-              开启自动生产后，系统推进到下一个审核点。批准视频后合成分集
-              MP4，下载完整资料包。
+              可以查看方案、修改分镜或换自己提供的素材。修改后相关结果会重新制作；随时可以暂停，也可以选择逐步检查。
             </p>
           </li>
         </ol>
         <div class="notice">
           <Icon
             name="help"
-          />模型生成需要可用账号与额度。网页额度不足时，只有启用付费策略才会切换付费渠道；画面、口型和内容质量仍需你审核。
+          />全自动会锁定人物、场景和物品的参考，检查不过就返工。缺账号、原参考或录音，以及请求结果不明时会说明原因。不会新增定制音色；自动检查仍可能误判。
         </div>
         <button
           class="btn primary"

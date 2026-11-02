@@ -139,6 +139,13 @@ class Providers:
         self.store.save_job(job)
 
     async def generate(self, kind, job, prompt, refs=(), duration=5, aspect_ratio="9:16", output=None):
+        from studio.tencent_moderation import check
+
+        if kind == "video" and any(r.get("provider") != "tokenhub-vidu" for r in job["snapshot"]["routes"][kind]):
+            raise ProviderFailure("VIDEO_PROVIDER_BLOCKED", "视频仅允许腾讯 TokenHub Vidu，请移除旧视频渠道后重新创建任务")
+        await check(self, job, "text", prompt)
+        for ref in refs:
+            await check(self, job, "video" if ref.suffix.lower() == ".mp4" else "image", ref)
         call_key = digest(
             {
                 "kind": kind,
@@ -161,6 +168,12 @@ class Providers:
         allow_paid = job["snapshot"]["allow_paid"]
         last = None
         for index, saved in enumerate(routes):
+            if job["snapshot"].get("full_auto"):
+                project = self.store.project(job["project_id"])
+                if (project.get("paused") or project.get("cancelled") or not project.get("automation")
+                        or project.get("production_mode") != "full"
+                        or not project.get("automation_authorization", {}).get("unlimited_budget")):
+                    raise ProviderFailure("AUTOMATION_DISABLED", "全自动已暂停或关闭，不再提交后续模型请求")
             if index < job["runtime"].get("route_index", 0):
                 continue
             matching = next(
@@ -173,6 +186,12 @@ class Providers:
                 None,
             )
             route = saved.model_copy(update={"api_key": matching.api_key if matching else None})
+            options = job["snapshot"].get("entity", {}).get("vidu", {}) if kind == "video" else {}
+            if (route.provider != "tokenhub-vidu" and (
+                options.get("audio") or options.get("bgm") or options.get("reference_previous_video")
+                or options.get("family", "auto") != "auto" or options.get("preference", "default") != "default"
+            )):
+                raise ProviderFailure("VIDU_ROUTE_REQUIRED", "本镜指定了 Vidu 分流条件，不能改走忽略这些条件的备用渠道")
             paid = await self.is_paid(route)
             if paid and not allow_paid:
                 last = ProviderFailure(
@@ -181,7 +200,8 @@ class Providers:
                 continue
             self.store.event(job["id"], f"渠道 {index + 1}：{route.provider} / {route.model}")
             try:
-                if kind in {"image", "vision"} and job["stage"] in {"reference", "keyframe"}:
+                if (kind in {"image", "vision"} and job["stage"] in {"reference", "keyframe"}
+                        and not job["snapshot"].get("unlimited_budget")):
                     potentially_paid = paid or (
                         kind == "image" and allow_paid and route.transport == "gateway" and route.provider == "gemini"
                     )
@@ -197,7 +217,15 @@ class Providers:
                                 raise ProviderFailure("QC_BUDGET_EXHAUSTED", "本图预计费用预算不足，已停止提交；请检查任务详情")
                             reservations[reservation_id] = cost
                             self.checkpoint(job, qc_cost_reservations=reservations)
-                if route.transport == "gateway":
+                if kind == "video" and route.transport == "cloud" and route.provider == "tencent-vidu":
+                    from studio.tencent_video import generate as tencent_generate
+
+                    result = await tencent_generate(self, job, route, prompt, refs, duration)
+                elif kind == "video" and route.transport == "cloud" and route.provider == "tokenhub-vidu":
+                    from studio.tokenhub_video import generate as tokenhub_generate
+
+                    result = await tokenhub_generate(self, job, route, prompt, refs, duration)
+                elif route.transport == "gateway":
                     result = await self.gateway_generate(
                         "text" if kind == "vision" else kind,
                         job, route, index, prompt, refs, duration, aspect_ratio,
@@ -206,6 +234,8 @@ class Providers:
                     result = await self.cloud_generate(
                         "text" if kind == "vision" else kind, job, route, prompt, refs, aspect_ratio
                     )
+                if kind == "text":
+                    await check(self, job, "text", result["text"])
                 actual = result.pop("actual_route", None)
                 result["route"] = actual or {
                     "transport": route.transport,
@@ -243,7 +273,7 @@ class Providers:
                     path.write_bytes(raw)
                     if kind == "video":
                         try:
-                            result["metadata"] = await self.engine_request("/validate", {"file": filename})
+                            result["metadata"] = {**result.get("metadata", {}), **(await self.engine_request("/validate", {"file": filename}))}
                         except Exception:
                             path.unlink(missing_ok=True)
                             raise
@@ -511,7 +541,7 @@ class Providers:
         else:
             self.checkpoint(job, cloud_submitting=True, receipt=str(receipt.relative_to(self.store.root)))
             try:
-                response = await self.client.post(route.base_url + path, headers=headers, **kwargs)
+                response = await self.client.post(route.base_url + path, headers=headers, follow_redirects=False, **kwargs)
             except httpx.TransportError as exc:
                 raise ProviderFailure(
                     "SUBMISSION_UNKNOWN", "云模型提交结果不明，请核对供应商请求记录后处理"
@@ -544,6 +574,8 @@ class Providers:
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError("Empty model text")
                 self.checkpoint(job, cloud_submitting=False)
+                from studio.tencent_moderation import check
+                await check(self, job, "text", value)
                 return {"text": value}
             item = body["data"][0]
             if item.get("b64_json"):

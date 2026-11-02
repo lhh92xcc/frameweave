@@ -14,7 +14,7 @@ test("real studio: source, contract, storyboard, imported references, video, rev
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "每个想法，都值得被看见。" }),
+    page.getByRole("heading", { name: "今天想做什么视频？" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "开启新创作" }).click();
   await page.getByRole("button", { name: "填入示例小说" }).click();
@@ -169,7 +169,7 @@ test("settings preserve write-only keys and expose current gateway catalog", asy
 }) => {
   await page.goto("/#settings");
   await expect(
-    page.getByRole("heading", { name: "连接模型，释放创作。" }),
+    page.getByRole("heading", { name: "先把制作需要的工具接好" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "账号与连接", exact: true }).click();
   await expect(page.locator(".connection-card")).not.toHaveCount(0);
@@ -182,7 +182,7 @@ test("mobile navigation and workspace fit a 390px screen", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "每个想法，都值得被看见。" }),
+    page.getByRole("heading", { name: "今天想做什么视频？" }),
   ).toBeVisible();
   expect(
     await page.evaluate(() => document.body.scrollWidth),
@@ -190,7 +190,7 @@ test("mobile navigation and workspace fit a 390px screen", async ({ page }) => {
   await page.getByRole("button", { name: "打开导航" }).click();
   await page.getByRole("button", { name: "生成队列", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "创作在进行，一切有迹可循。" }),
+    page.getByRole("heading", { name: "看看系统正在做什么" }),
   ).toBeVisible();
   expect(
     await page.evaluate(() => document.body.scrollWidth),

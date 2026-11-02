@@ -35,6 +35,7 @@ from studio.models import (
     ShotReferences,
     StageRequest,
 )
+from studio.pipeline_rules import PipelineEdit, public_rules
 from studio.providers import ProviderFailure, Providers, gateway_result_uncertain, requires_verification
 from studio.settings import SettingsStore
 from studio.store import Conflict, Store, uid
@@ -207,12 +208,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
 
     @app.post("/api/projects/{project_id}/automation")
     async def automation(project_id: str, body: RunRequest):
-        p = store.project(project_id)
-        p.update(automation=body.enabled, paused=False, cancelled=False)
-        p.pop("automation_error", None)
-        store.save_project(p, p["version"])
-        workflow.wake.set()
-        return p
+        return workflow.set_automation(project_id, body)
 
     @app.post("/api/projects/{project_id}/pause")
     @app.post("/api/projects/{project_id}/resume")
@@ -305,6 +301,15 @@ def create_app(data_dir=None, start_worker=True, transport=None):
             j["runtime"].pop("vision_calls", None)
             if (j.get("error") or {}).get("code") == "VISION_INVALID":
                 j["runtime"]["qc_retry_nonce"] = j["runtime"].get("qc_retry_nonce", 0) + 1
+            j.update(status="queued", error=None)
+            store.save_job(j)
+            workflow.wake.set()
+            return j
+        if (
+            (j["runtime"].get("tencent_task") and (j.get("error") or {}).get("code") != "TENCENT_TASK_FAILED")
+            or (j["runtime"].get("tokenhub_task") and (j.get("error") or {}).get("code") != "TOKENHUB_TASK_FAILED")
+        ):
+            workflow.assert_current(j, allow_cancelled_job=True)
             j.update(status="queued", error=None)
             store.save_job(j)
             workflow.wake.set()
@@ -554,6 +559,28 @@ def create_app(data_dir=None, start_worker=True, transport=None):
             background=BackgroundTask(path.unlink, missing_ok=True),
         )
 
+    def pause_for_rule_change():
+        for project in store.projects():
+            if project.get("automation") and not project.get("paused"):
+                project["paused"] = True
+                store.save_project(project, project["version"])
+        workflow.wake.set()
+
+    @app.get("/api/settings/pipeline")
+    async def get_pipeline():
+        return public_rules(settings.get())
+
+    @app.put("/api/settings/pipeline")
+    async def save_pipeline(body: PipelineEdit):
+        current = settings.get()
+        if body.expected_revision != current.pipeline_revision:
+            raise Conflict("制作规则已更新，请重新读取后修改")
+        current.pipeline = body.rules
+        settings.save(current)
+        if settings.get().pipeline_revision != body.expected_revision:
+            pause_for_rule_change()
+        return public_rules(settings.get())
+
     @app.get("/api/settings")
     async def get_settings():
         return settings.public(settings.get())
@@ -599,7 +626,16 @@ def create_app(data_dir=None, start_worker=True, transport=None):
 
     @app.put("/api/settings")
     async def save_settings(body: RoutingSettings):
-        return settings.save(body)
+        previous = settings.get()
+        if "pipeline" not in body.model_fields_set:
+            body.pipeline = previous.pipeline
+            body.pipeline_revision = previous.pipeline_revision
+        if "pipeline" in body.model_fields_set and body.pipeline != previous.pipeline and body.pipeline_revision != previous.pipeline_revision:
+            raise Conflict("制作规则已更新，请重新读取")
+        result = settings.save(body)
+        if result["pipeline_revision"] != previous.pipeline_revision or settings.get().moderation != previous.moderation:
+            pause_for_rule_change()
+        return result
 
     @app.get("/api/storage")
     async def storage_settings():

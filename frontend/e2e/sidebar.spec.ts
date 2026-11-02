@@ -90,7 +90,7 @@ test("desktop sidebar scrolls independently without compressing recent projects"
   await sidebar.getByRole("button", { name: "模型与连接" }).click();
   await expect(page).toHaveURL(/#settings$/);
   await expect(
-    page.getByRole("heading", { name: "连接模型，释放创作。" }),
+    page.getByRole("heading", { name: "先把制作需要的工具接好" }),
   ).toBeVisible();
 });
 

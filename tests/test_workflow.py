@@ -268,7 +268,9 @@ async def test_model_protocol_executes_requirements_and_repairs_storyboard(app, 
     await w.execute(job)
     assert w.store.job(job["id"])["status"] == "succeeded"
     p = w.store.project(p["id"])
-    assert p["plan"] == plan
+    from studio.models import ProductionPlan
+
+    assert p["plan"] == ProductionPlan.model_validate(plan).model_dump()
     assert not p["plan_approved"]
     assert "上次输出未通过结构校验" in prompts[3]
     assert all("SHA-256" in prompt for prompt in prompts)
@@ -525,6 +527,9 @@ async def test_automation_reports_batch_failures_without_automatic_resubmission(
     jobs = {job["entity_id"]: job for job in workflow.store.jobs(p["id"])}
     assert set(jobs) == {"lin", "bird"}
     assert client.get(f"/api/projects/{p['id']}").json()["automation_status"]["state"] == "queued"
+    summary = next(item for item in client.get("/api/projects").json() if item["id"] == p["id"])
+    assert summary["automation_status"]["state"] == "queued"
+    assert "source" not in summary and "chapters" not in summary
 
     running = jobs["lin"]
     running["status"] = "running"
@@ -533,6 +538,8 @@ async def test_automation_reports_batch_failures_without_automatic_resubmission(
     workflow.store.event(running["id"], "正在等待网页网关")
     view = client.get(f"/api/projects/{p['id']}").json()
     assert view["automation_status"]["state"] == "running"
+    summary = next(item for item in client.get("/api/projects").json() if item["id"] == p["id"])
+    assert summary["automation_status"] == view["automation_status"]
     assert view["jobs"][0]["latest_event"]["message"] == "正在等待网页网关"
     assert "snapshot" not in view["jobs"][0]
 
@@ -547,6 +554,8 @@ async def test_automation_reports_batch_failures_without_automatic_resubmission(
     assert view["automation_status"] == {
         "state": "attention", "stage": "reference", "job_ids": [running["id"]]
     }
+    summary = next(item for item in client.get("/api/projects").json() if item["id"] == p["id"])
+    assert summary["automation_status"] == view["automation_status"]
     await workflow.advance(p)
     assert len(workflow.store.jobs(p["id"])) == 2
 

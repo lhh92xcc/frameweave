@@ -66,16 +66,30 @@ class ReferenceGuard:
     def __init__(self, workflow, project):
         self.workflow, self.project = workflow, project
         self.explicit = read_policy(project["contract"]["markdown"])
+        self.multiview = bool(self.explicit or project.get("production_mode") == "full")
         self.policy = self.explicit
         if not self.policy and project.get("plan"):
+            roles = {"character": ["front", "side", "full_body"], "location": ["wide", "reverse"],
+                     "prop": ["general", "detail"], "product": ["general", "detail"]}
             self.policy = ReferencePolicy(version=1, assets={
-                asset["id"]: AssetReferences(required_roles=["general"], shot_roles=["general"])
+                asset["id"]: AssetReferences(
+                    required_roles=roles[asset["kind"]] if self.multiview else ["general"],
+                    shot_roles=roles[asset["kind"]] if self.multiview else ["general"],
+                )
                 for asset in project["plan"]["assets"]
             })
 
     def canonical(self, entity_id):
         """An approved independent original remains the anchor, never a derivative."""
-        candidates = [a for a in self.workflow.store.artifacts(self.project["id"])
+        return self.workflow.cached(("canonical", self.project["id"], self.project["version"], entity_id),
+                                    lambda: self._canonical(entity_id))
+
+    def artifacts(self):
+        return self.workflow.cached(("reference_artifacts", self.project["id"]),
+                                    lambda: self.workflow.store.artifacts(self.project["id"]))
+
+    def _canonical(self, entity_id):
+        candidates = [a for a in self.artifacts()
                       if a["kind"] == "reference" and a["entity_id"] == entity_id
                       and not a.get("archived") and not a.get("dependencies")
                       and a["contract_hash"] == self.project["contract"]["hash"]
@@ -90,8 +104,12 @@ class ReferenceGuard:
 
     def views(self, entity_id):
         """Keep the newest candidate per role, including pending/rejected replacements."""
+        return self.workflow.cached(("views", self.project["id"], self.project["version"], entity_id),
+                                    lambda: self._views(entity_id))
+
+    def _views(self, entity_id):
         result = {}
-        for artifact in self.workflow.store.artifacts(self.project["id"]):
+        for artifact in self.artifacts():
             if (
                 artifact["kind"] != "reference" or artifact["entity_id"] != entity_id
                 or artifact.get("archived") or artifact["contract_hash"] != self.project["contract"]["hash"]
@@ -101,15 +119,19 @@ class ReferenceGuard:
             role = artifact.get("metadata", {}).get("reference_role", "general")
             if role not in result or artifact["created_at"] > result[role]["created_at"]:
                 result[role] = artifact
-        if not self.explicit:
+        if not self.multiview:
             master = self.canonical(entity_id)
             if master:
                 result["general"] = master
+        elif not self.explicit:
+            master = self.canonical(entity_id)
+            if master:
+                result[self.policy.assets[entity_id].required_roles[0]] = master
         return result
 
     def master(self, entity_id, source_id=None):
         rules = self.policy.assets[entity_id]
-        master = (self.views(entity_id).get(rules.required_roles[0]) if self.explicit
+        master = (self.views(entity_id).get(rules.required_roles[0]) if self.multiview
                   else self.canonical(entity_id))
         if not master or master["review"] != "approved":
             raise ValueError(f"{entity_id} 缺少已批准的 {rules.required_roles[0]} 母版；请先上传并审核，禁止无参考生图")
@@ -133,7 +155,11 @@ class ReferenceGuard:
         """Pending views are reviewable only while their canonical source is current."""
         rules = self.policy.assets.get(artifact["entity_id"])
         role = artifact.get("metadata", {}).get("reference_role", "general")
-        if not self.explicit:
+        if self.multiview and not self.explicit:
+            canonical = self.canonical(artifact["entity_id"])
+            if canonical and canonical["id"] == artifact["id"] and not artifact.get("dependencies"):
+                return True
+        if not self.multiview:
             if not rules:
                 return False
             master = self.canonical(artifact["entity_id"])
@@ -174,7 +200,7 @@ class ReferenceGuard:
         return [views[role]["id"] for role in rules.shot_roles]
 
     def target_role(self, entity_id, requested=None):
-        if not self.explicit:
+        if not self.multiview:
             candidate = self.canonical(entity_id)
             if not candidate and self.has_previous_reference(entity_id):
                 raise ValueError("已有旧版本资产原图，请重新导入并按当前规范审核，禁止无参考重定身份")
@@ -187,6 +213,14 @@ class ReferenceGuard:
             return requested or "general"
         rules = self.policy.assets[entity_id]
         role = requested
+        if self.project.get("production_mode") == "full":
+            master = self.canonical(entity_id)
+            if not master and not self.has_previous_reference(entity_id):
+                if role is None or role == rules.required_roles[0]:
+                    return rules.required_roles[0]
+            if master and master["review"] == "rejected" and not master.get("approved_once"):
+                if role is None or role == rules.required_roles[0]:
+                    return rules.required_roles[0]
         if role is None:
             master, views = self.master(entity_id), self.views(entity_id)
             role = next((r for r in rules.required_roles[1:]
@@ -203,7 +237,7 @@ class ReferenceGuard:
         return any(a["kind"] == "reference" and a["entity_id"] == entity_id and not a.get("archived")
                    and (a["contract_hash"] != self.project["contract"]["hash"]
                         or a["plan_revision"] != self.project["plan_revision"])
-                   for a in self.workflow.store.artifacts(self.project["id"]))
+                   for a in self.artifacts())
 
     def previous_shot(self, shot_id):
         for episode in self.project["plan"]["episodes"]:
@@ -217,6 +251,8 @@ class ReferenceGuard:
 
     def attachment_group(self, artifact):
         rules = self.policy.assets.get(artifact["entity_id"])
+        if artifact["kind"] == "reference" and rules and self.project.get("production_mode") == "full":
+            return "asset:" + artifact["entity_id"]
         if artifact["kind"] == "reference" and rules and rules.required_roles[0] == "front":
             return "character:" + artifact["entity_id"]
         return artifact["id"]
@@ -225,7 +261,7 @@ class ReferenceGuard:
         if not self.policy:
             return None
         result = {"assets": {}, "max_references": self.policy.max_references, "continuity": self.policy.continuity,
-                  "mode": "explicit" if self.explicit else "automatic"}
+                  "mode": "explicit" if self.explicit else "full" if self.multiview else "automatic"}
         for entity_id, rules in self.policy.assets.items():
             views = self.views(entity_id)
             master = views.get(rules.required_roles[0])
@@ -247,7 +283,8 @@ def prepare_reference_images(workflow, job, paths):
     from studio.store import digest
 
     guard = ReferenceGuard(workflow, workflow.store.project(job["project_id"]))
-    if not guard.policy or job["stage"] != "keyframe":
+    kind = job["snapshot"].get("target_kind", job["stage"])
+    if not guard.policy or kind not in {"keyframe", "video"}:
         return paths
     groups = {}
     for id_, path in zip(job["snapshot"]["dependencies"], paths, strict=True):

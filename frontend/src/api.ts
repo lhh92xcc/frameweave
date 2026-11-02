@@ -39,6 +39,7 @@ export const stageText: Record<string, string> = {
   audio: "独立配音",
   render: "成片合成",
   archive: "历史素材导入",
+  quality: "自动检查",
 };
 export function stamp(value: number) {
   return new Date(value * 1000).toLocaleString("zh-CN", {
@@ -103,6 +104,8 @@ export interface Job {
   updated_at?: number;
   error?: { code: string; message: string };
   attempt: number;
+  retry_of?: string;
+  fingerprint?: string;
   verification_required?: boolean;
   events?: { created: number; message: string }[];
   latest_event?: { created: number; message: string } | null;
@@ -140,7 +143,7 @@ export interface Project {
   version: number;
   shot_reference_bindings?: Record<string, { artifact_ids: string[]; previous_shot_id: string | null }>;
   audio_cast?: { voices: Record<string, any>; speakers: Record<string, string> };
-  reference_readiness?: { assets: Record<string, { required_roles: string[]; shot_roles: string[]; views: { role: string; artifact_id?: string; approved: boolean }[] }>; max_references: number; mode?: "automatic" | "explicit" } | null;
+  reference_readiness?: { assets: Record<string, { required_roles: string[]; shot_roles: string[]; views: { role: string; artifact_id?: string; approved: boolean }[] }>; max_references: number; mode?: "automatic" | "explicit" | "full" } | null;
   title: string;
   mode: string;
   brief: string;
@@ -162,10 +165,12 @@ export interface Project {
   plan_approved: boolean;
   plan_contract_hash?: string;
   automation: boolean;
+  production_mode?: "manual" | "full";
   automation_status?: {
     state: string;
     stage?: string;
     job_ids?: string[];
+    retry_at?: number;
     error?: { code: string; message: string };
   };
   paused: boolean;

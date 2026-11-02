@@ -166,7 +166,7 @@ test("offline fixture: shows live task progress, failures, retry and review sepa
   await mockStudio(page, fixture);
   await page.goto("/#project/project_progress");
   const panel = page.getByRole("region", { name: "项目生产进度" });
-  await expect(panel).toContainText("自动推进进行中");
+  await expect(panel).toContainText("正在制作");
   await expect(panel).toContainText("生成中 1");
   await expect(panel).toContainText("排队 1");
   await expect(panel).toContainText("成功 1");
@@ -209,7 +209,7 @@ test("offline fixture: shows live task progress, failures, retry and review sepa
       url: "/api/artifacts/fixture_approved/content",
     },
   ];
-  await expect(panel).toContainText("等待人工审核", { timeout: 10000 });
+  await expect(panel).toContainText("等待检查结果", { timeout: 10000 });
   await panel.getByRole("button", { name: "前往审核" }).click();
   await expect(page.locator(".media-filters")).toContainText("已有结果 2 / 4");
   await expect(page.locator(".media-filters")).toContainText("待审核 1");
@@ -485,7 +485,7 @@ test("offline fixture: warns about an offline worker and an uncertain submission
   await mockStudio(page, fixture);
   await page.goto("/#project/project_progress");
   const panel = page.getByRole("region", { name: "项目生产进度" });
-  await expect(panel).toContainText("自动推进等待处理");
+  await expect(panel).toContainText("制作已停下，需要处理");
   await expect(panel).toContainText("工作线程未运行");
   await expect(panel).toContainText("请先在供应商侧核对任务和账单");
   await expect(panel.getByRole("button", { name: "重试" })).toBeDisabled();

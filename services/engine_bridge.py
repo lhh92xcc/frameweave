@@ -26,6 +26,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from services.renderer import StudioRenderer
+from studio.models import DanmakuCue
+from studio.pipeline_rules import PipelineRules
 
 MEDIA = Path(os.environ.get("FRAMEWEAVE_DATA", ".local")).resolve() / "media"
 MEDIA.mkdir(parents=True, exist_ok=True)
@@ -83,6 +85,83 @@ class Speech(BaseModel):
     output: str = Field(pattern=r"^art_[a-f0-9]+\.mp3$")
 
 
+class FitAudio(BaseModel):
+    file: str
+    duration: float = Field(gt=0, le=30)
+    output: str = Field(pattern=r"^art_[a-f0-9]+_fit\.mp3$")
+
+
+@app.post("/fit-audio")
+async def fit_audio(body: FitAudio):
+    source = local_file(body.file)
+    probe = await FFprobeAudioValidator().validate_bytes(source.read_bytes(), "audio/mpeg")
+    ratio = probe.duration_seconds / body.duration
+    if not 1 < ratio <= 2:
+        raise HTTPException(422, "配音无法在保持完整台词的前提下对齐，请调整分镜或台词")
+    target = MEDIA / body.output
+    await command("ffmpeg", "-y", "-v", "error", "-i", str(source), "-af", f"atempo={ratio:.6f}",
+                  "-c:a", "libmp3lame", "-q:a", "2", str(target))
+    fitted = await FFprobeAudioValidator().validate_bytes(target.read_bytes(), "audio/mpeg")
+    if fitted.duration_seconds > body.duration + 0.15:
+        raise HTTPException(422, "配音时长对齐后仍不满足要求，禁止截断台词")
+    return {"file": target.name, "metadata": {**dataclasses.asdict(fitted), "timing_fit": {
+        "source_seconds": probe.duration_seconds, "rate": ratio, "method": "pitch_preserving_atempo",
+    }}}
+
+
+class TrimAudio(FitAudio):
+    output: str = Field(pattern=r"^art_[a-f0-9]+_trim\.mp3$")
+
+
+class Silence(BaseModel):
+    output: str = Field(pattern=r"^art_[a-f0-9]+\.mp3$")
+    duration: float = Field(gt=0, le=30)
+
+
+@app.post("/silence")
+async def silence(body: Silence):
+    await command("ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", str(body.duration), "-c:a", "libmp3lame", str(MEDIA / body.output))
+    return {"file": body.output, "metadata": {"duration_seconds": body.duration, "degraded": True}}
+
+
+@app.post("/trim-audio")
+async def trim_audio(body: TrimAudio):
+    source = local_file(body.file)
+    target = MEDIA / body.output
+    await command("ffmpeg", "-y", "-v", "error", "-i", str(source), "-t", str(body.duration), "-c:a", "libmp3lame", str(target))
+    probe = await FFprobeAudioValidator().validate_bytes(target.read_bytes(), "audio/mpeg")
+    return {"file": target.name, "metadata": dataclasses.asdict(probe)}
+
+
+class VideoFrames(BaseModel):
+    file: str
+    duration: float | None = Field(default=None, gt=0, le=30)
+
+
+@app.post("/video-frames")
+async def video_frames(body: VideoFrames):
+    """Decode every video frame; no sparse sampling can silently miss a frame."""
+    source = local_file(body.file)
+    probe = await FFprobeVideoValidator().validate_bytes(source.read_bytes(), "video/mp4")
+    if not 0 < probe.duration_seconds <= 31:
+        raise HTTPException(422, "逐镜视频时长须在 0 到 31 秒内")
+    # Fixed private names allow restarts to reuse model checks of identical bytes.
+    duration = min(probe.duration_seconds, body.duration or probe.duration_seconds)
+    directory = MEDIA / (source.stem + f"-{duration:.3f}-qc")
+    directory.mkdir(exist_ok=True, mode=0o700)
+    for generated in directory.glob("??????.jpg"):
+        generated.unlink()
+    await command("ffmpeg", "-y", "-v", "error", "-i", str(source), "-t", str(duration), "-fps_mode", "passthrough",
+                  "-vf", "scale=960:960:force_original_aspect_ratio=decrease", str(directory / "%06d.jpg"))
+    files = sorted(directory.glob("*.jpg"))
+    if not files or len(files) > 4000 or any(not file.stat().st_size for file in files):
+        raise HTTPException(422, "视频检查画面提取不完整或帧数超过支持范围；禁止跳帧放行")
+    return {"frames": [{"file": file.relative_to(MEDIA).as_posix(), "index": i,
+                        "seconds": round(i * duration / len(files), 4)}
+                       for i, file in enumerate(files)], "duration_seconds": duration,
+            "coverage": "every_decoded_frame", "frame_count": len(files)}
+
+
 @app.post("/speech")
 async def speech(body: Speech):
     try:
@@ -101,6 +180,14 @@ class Clip(BaseModel):
     duration: float = Field(gt=0, le=30)
     subtitle: str = Field(default="", max_length=2500)
     audio: str | None = None
+    speech_start: float = Field(default=0, ge=0, le=600)
+    speech_end: float | None = Field(default=None, gt=0, le=600)
+
+
+class RenderSound(BaseModel):
+    file: str
+    time: float = Field(ge=0, le=3600)
+    volume: float = Field(default=0.7, ge=0, le=2)
 
 
 class Render(BaseModel):
@@ -109,6 +196,10 @@ class Render(BaseModel):
     aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16"
     subtitles: bool = True
     preserve_audio: bool = True
+    pipeline_rules: PipelineRules | None = None
+    bgm: str | None = None
+    sound_effects: list[RenderSound] = Field(default_factory=list, max_length=200)
+    danmaku: list[DanmakuCue] = Field(default_factory=list, max_length=500)
 
 
 async def command(*args):
@@ -127,6 +218,10 @@ async def command(*args):
 
 @app.post("/render")
 async def render(body: Render):
+    if body.pipeline_rules is not None:
+        from services.pipeline_renderer import render_pipeline
+
+        return await render_pipeline(body, MEDIA, local_file, command)
     width, height = {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720)}[body.aspect_ratio]
     clips, cues, tracks = [], [], []
     elapsed = 0.0

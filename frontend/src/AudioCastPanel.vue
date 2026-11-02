@@ -16,7 +16,7 @@ const characters = computed(() => [
 const shots = computed(() => (props.project.plan?.episodes || [])
   .flatMap((ep: any) => ep.shots).filter((shot: any) => shot.dialogue || shot.narration));
 const ready = computed(() => settings.value?.audio_mode === "cloud" &&
-  settings.value?.audio.provider === "minimax" && settings.value.audio.configured &&
+  ["minimax", "volcengine-tts"].includes(settings.value?.audio.provider) && settings.value.audio.configured &&
   settings.value.allow_paid && props.project.contract.approved && props.project.plan_approved &&
   !props.project.paused && !props.project.cancelled);
 const saved = ref("");
@@ -31,9 +31,13 @@ function sampleArtifact(speaker: string) {
 onMounted(async () => {
   try {
     settings.value = await api("/settings");
+    if (settings.value.audio.provider === "volcengine-tts") catalogue.value = [
+      {id: "zh_female_vv_uranus_bigtts", name: "火山系统女声"},
+      {id: "zh_male_m191_uranus_bigtts", name: "火山系统男声"},
+    ];
     for (const role of characters.value) {
       voices.value[role.id] = { ...speechDefaults,
-        voice_id: settings.value.audio.provider === "minimax" ? settings.value.voice : "male-qn-qingse",
+        voice_id: settings.value.voice,
         ...props.project.audio_cast?.voices?.[role.id] };
     }
     speakers.value = { ...(props.project.audio_cast?.speakers || {}) };
@@ -55,7 +59,9 @@ function setSource(speaker: string, source: string) {
 }
 async function loadVoices() {
   busy.value = true; error.value = "";
-  try { catalogue.value = (await api("/audio/minimax/voices")).voices; }
+  try {
+    if (settings.value.audio.provider === "minimax") catalogue.value = (await api("/audio/minimax/voices")).voices;
+  }
   catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
 }
@@ -105,6 +111,12 @@ async function audition(speaker: string) {
           <label class="field">{{ role.name }}供音方式
             <select :aria-label="role.name + '供音方式'" :value="voices[role.id].source || 'tts'" @change="setSource(role.id, ($event.target as HTMLSelectElement).value)">
               <option value="tts">已有音色合成台词</option><option value="recording">已有录音 / 猫叫，不调用 TTS</option>
+            </select>
+          </label>
+          <label v-if="voices[role.id].source === 'recording'" class="field">{{ role.name }}使用哪段已有录音？
+            <select v-model="voices[role.id].recording_artifact_id">
+              <option :value="undefined">沿用已确认的角色原音轨</option>
+              <option v-for="item in project.artifacts.filter(a => a.kind === 'audio' && a.review === 'approved')" :key="item.id" :value="item.id">{{ item.title || item.entity_id }} · 已确认录音</option>
             </select>
           </label>
           <template v-if="voices[role.id].source !== 'recording'">
