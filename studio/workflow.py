@@ -136,6 +136,8 @@ class Workflow(AutoProduction):
         elif body.mode == "manual":
             p["production_mode"] = "manual"
             p.pop("automation_authorization", None)
+        if body.stop_on_image_qc_exhaustion is not None:
+            p["stop_on_image_qc_exhaustion"] = body.stop_on_image_qc_exhaustion
         p.update(automation=body.enabled, paused=False, cancelled=False)
         p.pop("automation_error", None)
         self.store.save_project(p, p["version"])
@@ -194,6 +196,11 @@ class Workflow(AutoProduction):
 
     def _latest(self, p, kind, entity_id, check_dependencies=True):
         candidate = self.store.latest_artifact(p["id"], kind, entity_id)
+        # Original recordings are inputs, not generated shot audio. Their explicit
+        # selection survives storyboard edits; any derived audio is still versioned.
+        if kind == "recording":
+            return candidate if (candidate and not candidate.get("archived")
+                                 and p["contract"]["approved"] and p.get("plan_approved")) else None
         if (
             not candidate
             or candidate.get("archived")
@@ -285,12 +292,12 @@ class Workflow(AutoProduction):
         characters = {a["id"] for a in (p.get("plan") or {}).get("assets", []) if a["kind"] == "character"}
         if set(voices) - (characters | {"narrator"}):
             raise ValueError("配音角色必须来自当前分镜的人物素材或旁白")
-        for profile in voices.values():
+        for speaker_id, profile in voices.items():
             self.voice_library.validate_profile(profile)
             if profile.get("recording_artifact_id"):
                 if profile.get("source") != "recording":
                     raise ValueError("录音文件只能绑定到已有录音角色")
-                self.recording_source(p, profile, None)
+                self.recording_source(p, profile, speaker_id)
         shots = {s["id"]: s for s in self.shots(p)}
         for shot_id, speaker in speakers.items():
             if shot_id not in shots or not (shots[shot_id]["dialogue"] or shots[shot_id]["narration"]):
@@ -516,6 +523,7 @@ class Workflow(AutoProduction):
             "voice": settings.voice,
             "subtitles": settings.pipeline.subtitles.enabled,
             "image_qc_attempts": settings.image_qc_attempts,
+            "stop_on_image_qc_exhaustion": bool(p.get("stop_on_image_qc_exhaustion")),
             "image_qc_budget_cny": settings.image_qc_budget_cny,
             "settings_fingerprint": self.settings.fingerprint(),
             "pipeline_rules": settings.pipeline.model_dump(),
@@ -576,7 +584,7 @@ class Workflow(AutoProduction):
                 (guard.explicit and reference_role == guard.policy.assets[entity_id].required_roles[0])
                 or (not guard.explicit and (reference_role == "general" or not guard.canonical(entity_id)))
             ))
-            bootstrap = bool(not reference_upload and (not guard.explicit or full)
+            bootstrap = bool(not reference_upload and not guard.explicit
                              and not p.get("reference_masters", {}).get(entity_id)
                              and (not guard.canonical(entity_id) or guard.canonical(entity_id)["review"] == "rejected"))
             source = None if master_upload or bootstrap else self.reference_source(p, entity_id, reference_source_id)
@@ -721,7 +729,11 @@ class Workflow(AutoProduction):
         if guard.policy and a["kind"] == "reference" and not guard.current(a):
             raise Conflict("参考视角或其母版已变化，请按当前母版重新导入或生成")
         current = self.latest(p, a["kind"], a["entity_id"])
-        if not current or current["id"] != artifact_id:
+        is_original_recording = (a["kind"] == "recording" and any(
+            asset["id"] == a["entity_id"] and asset["kind"] == "character"
+            for asset in (p.get("plan") or {}).get("assets", [])
+        ))
+        if not is_original_recording and (not current or current["id"] != artifact_id):
             reusable_reference = (
                 a["kind"] == "reference" and a["contract_hash"] == p["contract"]["hash"]
                 and a["plan_revision"] == p["plan_revision"]
@@ -815,6 +827,11 @@ class Workflow(AutoProduction):
         for a in artifacts:
             current = None if a.get("archived") else self.latest(p, a["kind"], a["entity_id"])
             a["stale"] = False if a.get("archived") else not current or current["id"] != a["id"]
+            if a["kind"] == "recording" and not a.get("archived"):
+                a["stale"] = not (p["contract"]["approved"] and p.get("plan_approved") and any(
+                    asset["id"] == a["entity_id"] and asset["kind"] == "character"
+                    for asset in (p.get("plan") or {}).get("assets", [])
+                ))
             if a["kind"] == "reference" and not a.get("archived") and result["reference_readiness"]:
                 guard = ReferenceGuard(self, p)
                 a["stale"] = not guard.current(a)
@@ -952,7 +969,8 @@ class Workflow(AutoProduction):
                             missing = []
                             for id_, asset in readiness["assets"].items():
                                 if not asset["views"][0]["approved"]:
-                                    if self.full_auto(p) and not asset["views"][0]["artifact_id"] and not guard.has_previous_reference(id_):
+                                    if (self.full_auto(p) and not guard.explicit
+                                            and not asset["views"][0]["artifact_id"] and not guard.has_previous_reference(id_)):
                                         missing.append(id_)
                                     continue
                                 view = next((view for view in asset["views"][1:] if not view["approved"]), None)
@@ -961,6 +979,12 @@ class Workflow(AutoProduction):
                                     missing.append(id_)
                             if missing:
                                 return schedule("reference", missing)
+                            if guard.explicit and any(not asset["views"][0]["artifact_id"]
+                                                      for asset in readiness["assets"].values()):
+                                return {"state": "error", "error": {
+                                    "code": "REFERENCE_MASTER_REQUIRED",
+                                    "message": "强制参考规范要求先选定并上传缺失资产的母版；不会降级为纯文字生成。",
+                                }}
                         return {"state": "review", "stage": "reference"}
                     continue
             pending = [e for e in entities if not self.latest(p, kind, e["id"])]
@@ -1527,10 +1551,43 @@ class Workflow(AutoProduction):
             result["metadata"]["duration_warning"] = "输出短于分镜要求，需重新生成或修改分镜，合成会阻止放行"
         await self.backup_output(job, self.save_output(job, artifact_id, result))
 
+    def pending_image_sha256(self, job):
+        """Verify an unfinished candidate before reusing it for visual QC."""
+        import base64
+        import hashlib
+
+        from studio.archive_import import sha256
+
+        pending = job["runtime"].get("pending_qc_image") or {}
+        filename = (pending.get("result") or {}).get("file", "")
+        path = (self.store.media / filename).resolve()
+        if not filename or not path.is_relative_to(self.store.media.resolve()) or not path.is_file():
+            raise ProviderFailure("CANDIDATE_MISSING", "已生成图片缺失，不能继续质检或自动重复生图")
+        actual = sha256(path)
+        expected = pending.get("sha256")
+        if not expected:
+            # Older candidates did not store a digest. Only recover them if a
+            # durable image receipt independently confirms the same bytes.
+            for call_id, result in job["runtime"].get("media_calls", {}).items():
+                if result.get("file") != filename or not re.fullmatch(r"[a-f0-9]{64}", call_id):
+                    continue
+                receipt = self.store.root / "receipts" / f"{job['id']}-{call_id}.json"
+                try:
+                    body = json.loads(receipt.read_text())
+                    raw = base64.b64decode(body["data"][0]["b64_json"], validate=True)
+                    expected = hashlib.sha256(raw).hexdigest()
+                except (OSError, ValueError, KeyError, TypeError, IndexError):
+                    continue
+                break
+        if not expected or actual != expected:
+            raise ProviderFailure("CANDIDATE_CHANGED", "候选图片无法核对原始字节，禁止继续质检或自动重复生图")
+        pending["sha256"] = actual
+        return actual
+
     async def image_with_qc(self, job, base_prompt, refs, artifact_id):
         snapshot = job["snapshot"]
         usable_vision_routes = [
-            route for route in snapshot["routes"]["vision"]
+            route for route in job["runtime"].get("vision_recovery_routes", snapshot["routes"]["vision"])
             if route["transport"] != "cloud" or snapshot["allow_paid"]
         ]
         if len(refs) >= 10 and usable_vision_routes and all(
@@ -1576,11 +1633,23 @@ class Workflow(AutoProduction):
             job["effective_prompt"] = prompt
             self.store.save_job(job)
             self.store.event(job["id"], f"图片第 {used + number}/{max_attempts} 次生成")
-            result = await self.providers.generate(
-                "image", job, prompt, refs, aspect_ratio=snapshot["aspect_ratio"], output=f"{artifact_id}_{number}"
-            )
-            job["runtime"]["pending_qc_image"] = {"attempt": number, "prompt": prompt, "result": result}
-            self.store.save_job(job)
+            pending = job["runtime"].get("pending_qc_image")
+            if pending:
+                if pending.get("attempt") != number or pending.get("prompt") != prompt:
+                    raise ProviderFailure("STALE_INPUT", "候选图片的原始提示词或轮次已变化，禁止自动复用")
+                self.pending_image_sha256(job)
+                result = pending["result"]
+            else:
+                result = await self.providers.generate(
+                    "image", job, prompt, refs, aspect_ratio=snapshot["aspect_ratio"], output=f"{artifact_id}_{number}"
+                )
+                from studio.archive_import import sha256
+
+                job["runtime"]["pending_qc_image"] = {
+                    "attempt": number, "prompt": prompt, "result": result,
+                    "sha256": sha256(self.store.media / result["file"]),
+                }
+                self.store.save_job(job)
             self.assert_current(job)
             candidate = self.store.media / result["file"]
             qc_prompt = (
@@ -1597,6 +1666,17 @@ class Workflow(AutoProduction):
                 "state 按本镜剧情允许的状态变化核对，固定身份和外观以母版及规范为准。"
                 "correction 为针对失败或不确定项的具体画面修正，不得修改已批准规范。"
             )
+            qc_prompt += (
+                "\nasset_checks 的键必须且只能是本次绑定的这些资产 ID："
+                + json.dumps([asset["id"] for asset in snapshot["qc_assets"]], ensure_ascii=False)
+                + "。完整目录只用于总项检查，其他资产即使出现在画面中，也不能额外写入 asset_checks。"
+            )
+            if job["stage"] == "reference" and snapshot.get("reference_role") == "spatial":
+                qc_prompt += (
+                    "\n本次为场景空间关系视角：对照母版具体检查摄影位置、可见空间和固定结构。"
+                    "仅将原画面放大裁切不能充当新的空间视角；桌侧支撑点、建筑与相对位置变化"
+                    "必须有画面依据。不一致判 fail，无法确认判 uncertain，说明具体原因。"
+                )
             if job["runtime"].get("qc_retry_nonce"):
                 qc_prompt += f"\n请重新独立检查，复核轮次 {job['runtime']['qc_retry_nonce']}。"
             response = await self.providers.generate("vision", job, qc_prompt, [*refs, candidate])

@@ -161,6 +161,33 @@ async def test_full_image_retries_beyond_bounded_batch_without_replacing_master(
 
 
 @pytest.mark.asyncio
+async def test_full_project_can_stop_after_configured_image_attempts(app, client, monkeypatch):
+    w = app.state.workflow
+    p = full_project(client)
+    response = client.post(f"/api/projects/{p['id']}/automation", json={
+        'enabled': True, 'stop_on_image_qc_exhaustion': True,
+    })
+    assert response.status_code == 200
+    counts, _ = install_offline(w, monkeypatch, fail_image=9)
+    for _ in range(12):
+        p = w.store.project(p['id'])
+        await w.advance_safely(p)
+        for j in w.store.jobs(p['id']):
+            if j['status'] == 'blocked' and j['error']['code'] == 'IMAGE_QC_EXHAUSTED':
+                j['finished_at'] = now() - 1000
+                w.store.save_job(j)
+        queued = [j for j in reversed(w.store.jobs(p['id'])) if j['status'] == 'queued']
+        if queued:
+            await w.execute(queued[0])
+    p = w.store.project(p['id'])
+    assert counts['image'] == 3
+    assert w.automation_state(p)['state'] == 'attention'
+    failed = next(j for j in w.store.jobs(p['id']) if j['stage'] == 'reference' and j['status'] == 'blocked')
+    assert failed['error']['code'] == 'IMAGE_QC_EXHAUSTED'
+    assert failed['snapshot']['stop_on_image_qc_exhaustion'] is True
+
+
+@pytest.mark.asyncio
 async def test_disable_full_mode_stops_further_calls(app, client, monkeypatch):
     w = app.state.workflow
     p = full_project(client)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import mimetypes
@@ -38,7 +39,7 @@ from studio.models import (
 from studio.pipeline_rules import PipelineEdit, public_rules
 from studio.providers import ProviderFailure, Providers, gateway_result_uncertain, requires_verification
 from studio.settings import SettingsStore
-from studio.store import Conflict, Store, uid
+from studio.store import Conflict, Store, now, uid
 from studio.workflow import Workflow
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -298,11 +299,24 @@ def create_app(data_dir=None, start_worker=True, transport=None):
             and (j.get("error") or {}).get("code") != "IMAGE_QC_EXHAUSTED"
         ):
             workflow.assert_current(j, allow_cancelled_job=True)
+            checksum = workflow.pending_image_sha256(j)
+            current_vision = [
+                {key: value for key, value in route.items() if key != "configured"}
+                for route in settings.public(settings.get())["vision"]
+            ]
+            previous_vision = j["runtime"].get("vision_recovery_routes", j["snapshot"]["routes"]["vision"])
+            j["runtime"].setdefault("vision_recovery_history", []).append({
+                "at": now(), "previous_routes": previous_vision, "routes": current_vision,
+                "candidate_sha256": checksum,
+            })
+            j["runtime"]["vision_recovery_routes"] = current_vision
             j["runtime"].pop("vision_calls", None)
+            j["runtime"].update(active_call=None, route_index=0, remote_id=None, remote_kind=None)
             if (j.get("error") or {}).get("code") == "VISION_INVALID":
                 j["runtime"]["qc_retry_nonce"] = j["runtime"].get("qc_retry_nonce", 0) + 1
             j.update(status="queued", error=None)
             store.save_job(j)
+            store.event(job_id, "保留已生成候选及原始任务快照，按当前视觉渠道重新质检")
             workflow.wake.set()
             return j
         if (
@@ -372,7 +386,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         project_id: str, stage: str = Form(...), entity_id: str = Form(...), file: UploadFile = File(...),
         reference_role: str = Form(default="general"),
     ):
-        if stage not in {"reference", "keyframe", "video", "audio"}:
+        if stage not in {"reference", "keyframe", "video", "audio", "recording"}:
             raise ValueError("不支持该素材类型")
         p = store.project(project_id)
         if stage == "reference":
@@ -381,8 +395,20 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                 raise ValueError("参考图分类与素材类型不匹配")
         elif reference_role != "general":
             raise ValueError("只有素材参考图可以设置参考分类")
-        snapshot = workflow.snapshot(p, stage, entity_id, allow_unapproved_reference=stage == "reference",
-                                     reference_role=reference_role if stage == "reference" else None)
+        if stage == "recording":
+            asset = workflow.entity(p, "reference", entity_id)
+            if asset["kind"] != "character":
+                raise ValueError("原录音必须属于当前项目的角色")
+            if not p["contract"]["approved"] or not p["plan_approved"] or p["cancelled"]:
+                raise ValueError("请先批准当前规范和分镜，且项目不能已取消")
+            # Importing an existing source is not the post-video audio stage and
+            # is safe while paused. It cannot count as generated shot audio.
+            snapshot = workflow.snapshot({**p, "paused": False}, "plan", "")
+            snapshot.update(recording_speaker_id=entity_id,
+                            shot_reference_bindings=p.get("shot_reference_bindings", {}))
+        else:
+            snapshot = workflow.snapshot(p, stage, entity_id, allow_unapproved_reference=stage == "reference",
+                                         reference_role=reference_role if stage == "reference" else None)
         chunks, size = [], 0
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
@@ -415,8 +441,25 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         path = store.media / filename
         path.write_bytes(raw)
         try:
-            if stage in {"video", "audio"}:
-                metadata = await providers.engine_request("/validate", {"file": filename, "kind": stage})
+            if stage in {"video", "audio", "recording"}:
+                metadata = await providers.engine_request(
+                    "/validate", {"file": filename, "kind": "audio" if stage == "recording" else stage}
+                )
+            if stage == "recording":
+                formats = set(metadata.get("format_name", "").split(","))
+                detected = next(((name, suffix) for name, suffix, names in (
+                    ("audio/mpeg", ".mp3", {"mp3"}), ("audio/wav", ".wav", {"wav"}),
+                    ("audio/ogg", ".ogg", {"ogg"}), ("audio/mp4", ".m4a", {"mp4", "m4a"}),
+                    ("audio/aac", ".aac", {"aac"}), ("audio/webm", ".webm", {"webm"}),
+                ) if formats & names), None)
+                if not detected:
+                    raise ValueError("已有录音须为可解码的 MP3、WAV、OGG、M4A、AAC 或 WebM")
+                mime, suffix = detected
+                new_path = store.media / (artifact_id + suffix)
+                if new_path != path:
+                    path.replace(new_path)
+                    path, filename = new_path, new_path.name
+                metadata.update(source_recording=True, source_sha256=hashlib.sha256(raw).hexdigest())
             current = store.project(project_id)
             if (
                 current["contract"]["hash"] != snapshot["contract_hash"]
@@ -438,6 +481,7 @@ def create_app(data_dir=None, start_worker=True, transport=None):
                     "mime": mime,
                     "metadata": metadata,
                     "route": {"provider": "user-upload", "model": "original", "paid": False},
+                    **({"title": f"{asset['name']} · 已有录音"} if stage == "recording" else {}),
                 },
             )
             result = await workflow.backup_output(job, result)
@@ -585,6 +629,11 @@ def create_app(data_dir=None, start_worker=True, transport=None):
     async def get_settings():
         return settings.public(settings.get())
 
+    @app.get("/api/settings/snapshot")
+    async def settings_snapshot():
+        public = settings.public(settings.get())
+        return {"settings": public, "revision": settings.revision()}
+
     @app.get("/api/audio/minimax/voices")
     async def minimax_voices():
         from studio.minimax import voices
@@ -625,8 +674,11 @@ def create_app(data_dir=None, start_worker=True, transport=None):
         return FileResponse(workflow.voice_library.preview(voice_id), media_type="audio/mpeg")
 
     @app.put("/api/settings")
-    async def save_settings(body: RoutingSettings):
+    async def save_settings(body: RoutingSettings, request: Request):
         previous = settings.get()
+        expected = request.headers.get("if-match")
+        if expected and expected != settings.revision():
+            raise Conflict("模型设置已在别处更新，请刷新后重新保存")
         if "pipeline" not in body.model_fields_set:
             body.pipeline = previous.pipeline
             body.pipeline_revision = previous.pipeline_revision

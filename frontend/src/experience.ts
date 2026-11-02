@@ -6,6 +6,7 @@ export const mediaNames: Record<string, string> = {
   keyframe: "镜头画面",
   video: "镜头视频",
   audio: "配音与录音",
+  recording: "已有录音",
   render: "最终成片",
 };
 export const taskNames: Record<string, string> = {
@@ -15,6 +16,7 @@ export const taskNames: Record<string, string> = {
   keyframe: "制作镜头画面",
   video: "生成镜头视频",
   audio: "制作配音",
+  recording: "导入已有录音",
   quality: "检查素材是否合格",
   render: "合成最终成片",
   archive: "导入已有素材",

@@ -76,6 +76,9 @@ async function editAbility(kind: string) {
 function addArk() {
   settings.value.text.unshift({transport: "cloud", provider: "volcengine-ark", model: "", base_url: "https://ark.cn-beijing.volces.com/api/v3", configured: false});
 }
+function addSeedreamDirect() {
+  settings.value.image.unshift({transport: "cloud", provider: "volcengine-seedream", model: "doubao-seedream-5-0-flash-260915", base_url: "https://ark.cn-beijing.volces.com/api/v3", configured: false});
+}
 function configureAudioProvider(event: Event) {
   const provider = (event.target as HTMLSelectElement).value;
   settings.value.audio =
@@ -257,7 +260,19 @@ async function save() {
   busy.value = true;
   error.value = "";
   try {
-    const data = JSON.parse(JSON.stringify(settings.value));
+    const original = JSON.parse(savedSettings.value);
+    const edited = JSON.parse(JSON.stringify(settings.value));
+    const latest = await api("/settings/snapshot");
+    const data = latest.settings;
+    // Apply only edited sections, so a stale tab cannot reset another section.
+    // If the same section changed elsewhere, ask for a refresh instead.
+    for (const key of Object.keys(edited)) {
+      if (["pipeline", "pipeline_revision"].includes(key)) continue;
+      if (JSON.stringify(edited[key]) === JSON.stringify(original[key])) continue;
+      if (JSON.stringify(data[key]) !== JSON.stringify(original[key]))
+        throw new Error("这部分模型设置已在别处更新，请刷新页面后重新填写并保存。");
+      data[key] = edited[key];
+    }
     delete data.moderation.configured;
     delete data.pipeline;
     delete data.pipeline_revision;
@@ -268,7 +283,7 @@ async function save() {
         if (route.qc_max_cost_cny === "") route.qc_max_cost_cny = null;
       }
     }
-    settings.value = await api("/settings", "PUT", data);
+    settings.value = await api("/settings", "PUT", data, { "If-Match": latest.revision });
     savedSettings.value = JSON.stringify(settings.value);
     savedAllowPaid.value = settings.value.allow_paid;
     emit("notify", "模型策略已保存。密钥保留在本机，不会回显。");
@@ -668,6 +683,7 @@ onMounted(load);
         <button v-if="kind.id === 'video'" class="btn secondary small-btn" :disabled="settings.video.length >= 6" @click="addTokenHubVideo">添加腾讯 TokenHub · API Key</button>
         <p v-if="kind.id === 'video'" class="route-hint">TokenHub 使用独立 API Key：支持逐镜 Q2/Q3 分流，模型 auto 表示按分镜条件选择；无约束时 Q3 Turbo，分镜可选 Q2 与速度/画质/预算偏好。720p，支持图片与已批准前镜视频参考。需要启用 COS 云端存储，首帧会上传并通过临时链接交给模型。声音默认关闭，分镜可显式开启 audio 或 bgm；按 TokenHub 计费。</p>
 <button v-if="kind.id === 'text'" class="btn secondary small-btn" :disabled="settings.text.length >= 6" @click="addArk">添加豆包方舟 · API Key</button>
+<button v-if="kind.id === 'image'" class="btn secondary small-btn" :disabled="settings.image.length >= 6" @click="addSeedreamDirect">添加 Seedream 直连 · API Key</button>
 <p v-if="kind.id === 'video'" class="route-hint">视频仅允许 TokenHub Vidu。旧的其他视频渠道必须移除后再生成。</p>
         <div
           v-for="(r, i) in settings[kind.id]"
@@ -754,6 +770,9 @@ onMounted(load);
               >
                 去配置 <Icon name="arrow" :size="12" />
               </button>
+            </p>
+            <p v-else-if="kind.id === 'image' && r.provider === 'volcengine-seedream'" class="route-hint">
+              Seedream 直连接收全部绑定参考图片，按实际调用收费；此处单独保存方舟 Key。返回不明时须先核对，不会自动重复提交。
             </p>
             <p v-else-if="kind.id === 'image'" class="route-hint">
               图像渠道需要兼容 images/generations；绑定参考图时需要支持

@@ -500,6 +500,7 @@ async function reviewSelected(approved: boolean) {
           >
         </div>
         <p class="muted">{{ project.production_mode === 'full' ? '查看制作进度，完成后下载作品；需要调整时展开制作细节。' : stageDescription[stage] }}</p>
+        <p v-if="project.production_mode === 'full' && project.stop_on_image_qc_exhaustion" class="muted small">本项目图片质检达到设置次数后停止，保留候选与原因。</p>
       </div>
       <div class="button-row">
         <button v-if="project.plan" class="btn secondary" @click="voiceCastOpen = true"><Icon name="audio" :size="16" />角色配音</button>

@@ -21,10 +21,16 @@ RETRYABLE = {
 
 
 class AutoProduction:
-    def stopped_state(self, p, stage, jobs):
-        retrying = self.full_auto(p) and all(
-            (j.get("error") or {}).get("code") in RETRYABLE and not requires_verification(j) for j in jobs
+    @staticmethod
+    def can_auto_retry(p, job):
+        code = (job.get("error") or {}).get("code")
+        return (
+            code in RETRYABLE and not requires_verification(job)
+            and not (code == "IMAGE_QC_EXHAUSTED" and p.get("stop_on_image_qc_exhaustion"))
         )
+
+    def stopped_state(self, p, stage, jobs):
+        retrying = self.full_auto(p) and all(self.can_auto_retry(p, j) for j in jobs)
         result = {"state": "retrying" if retrying else "attention", "stage": stage, "job_ids": [j["id"] for j in jobs]}
         if retrying:
             result["retry_at"] = min(j.get("finished_at", now()) + min(300, 5 * 2 ** min(j.get("auto_retries", 0), 6)) for j in jobs)
@@ -132,7 +138,7 @@ class AutoProduction:
             for id_ in state["job_ids"]:
                 j = self.store.job(id_)
                 code = (j.get("error") or {}).get("code")
-                if code not in RETRYABLE or requires_verification(j):
+                if not self.can_auto_retry(p, j):
                     continue
                 delay = min(300, 5 * 2 ** min(j.get("auto_retries", 0), 6))
                 if now() < j.get("finished_at", now()) + delay:
@@ -380,10 +386,19 @@ class AutoProduction:
                     continue
                 if binding.get("speaker_id") == speaker and binding.get("voice_setting", {}).get("source") == "recording":
                     candidates.append(a)
-        source = next((a for a in candidates if a["project_id"] == p["id"] and a["kind"] == "audio"
-                       and a["review"] == "approved"), None)
+        source = next((a for a in candidates if a["project_id"] == p["id"]
+                       and not a.get("archived") and a["review"] == "approved"
+                       and (a["kind"] == "audio" or (a["kind"] == "recording"
+                            and a["entity_id"] == speaker))), None)
         if not source:
             raise ProviderFailure("RECORDED_AUDIO_ONLY", "已选用录音或猫叫，但缺少已确认的原音轨，请恢复原录音；不会用人声代替")
+        if source["kind"] == "recording":
+            from studio.archive_import import sha256
+
+            checksum = source.get("metadata", {}).get("source_sha256")
+            with self.cloud.materialize(self.store, source) as path:
+                if not checksum or sha256(path) != checksum:
+                    raise ProviderFailure("STALE_DEPENDENCY", "原录音文件与已确认内容不一致，请恢复原文件")
         return source
 
     async def quality(self, job):

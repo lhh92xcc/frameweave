@@ -194,7 +194,124 @@ async def test_offline_qc_recovery_keeps_generated_candidate(app, client, projec
     assert resumed["id"] == job["id"]
     await workflow.execute(resumed)
     assert workflow.store.job(job["id"])["status"] == "succeeded"
-    assert calls == {"image": 2, "vision": 2}
+    assert calls == {"image": 1, "vision": 2}
+
+
+@pytest.mark.asyncio
+async def test_offline_qc_prompt_names_only_bound_assets(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    approved = approve_with_plan(client, project)
+    job = workflow.enqueue(approved["id"], "reference", "lin")
+    prompts = []
+
+    async def generate(kind, saved, prompt, refs=(), **kwargs):
+        if kind == "image":
+            (workflow.store.media / "offline.png").write_bytes(b"offline generated candidate")
+            return {"file": "offline.png", "mime": "image/png", "metadata": {"aspect_matches": True}}
+        prompts.append(prompt)
+        return {"text": qc()}
+
+    monkeypatch.setattr(workflow.providers, "generate", generate)
+    await workflow.execute(job)
+    assert workflow.store.job(job["id"])["status"] == "succeeded"
+    assert 'asset_checks 的键必须且只能是本次绑定的这些资产 ID：["lin"]' in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_offline_qc_retry_uses_new_vision_route_and_keeps_original_snapshot(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    initial = RoutingSettings.model_validate({
+        "allow_paid": True,
+        "image_qc_budget_cny": 1,
+        "vision": [{"transport": "cloud", "provider": "cloud", "model": "old-vision",
+                    "base_url": "https://vision.example/v1", "api_key": "offline", "qc_max_cost_cny": 0.1}],
+    })
+    workflow.settings.save(initial)
+    approved = approve_with_plan(client, project)
+    job = workflow.enqueue(approved["id"], "reference", "lin")
+    calls = {"image": 0, "vision": 0}
+    seen = []
+
+    async def generate(kind, saved, prompt, refs=(), **kwargs):
+        calls[kind] += 1
+        if kind == "image":
+            (workflow.store.media / "offline.png").write_bytes(b"offline generated candidate")
+            return {"file": "offline.png", "mime": "image/png", "metadata": {"aspect_matches": True}}
+        seen.append(saved["runtime"].get("vision_recovery_routes", saved["snapshot"]["routes"]["vision"]))
+        if calls[kind] == 1:
+            raise ProviderFailure("CLOUD_REJECTED", "offline model unavailable")
+        return {"text": qc()}
+
+    monkeypatch.setattr(workflow.providers, "generate", generate)
+    await workflow.execute(job)
+    assert workflow.store.job(job["id"])["status"] == "blocked"
+    updated = workflow.settings.get()
+    updated.vision[0].model = "new-vision"
+    workflow.settings.save(updated)
+    response = client.post(f"/api/jobs/{job['id']}/retry")
+    assert response.status_code == 202, response.text
+    resumed = response.json()
+    assert resumed["snapshot"]["routes"]["vision"][0]["model"] == "old-vision"
+    history = resumed["runtime"]["vision_recovery_history"][-1]
+    assert history["routes"][0]["model"] == "new-vision"
+    assert len(history["candidate_sha256"]) == 64
+    assert "api_key" not in json.dumps(history)
+    await workflow.execute(resumed)
+    assert workflow.store.job(job["id"])["status"] == "succeeded"
+    assert calls == {"image": 1, "vision": 2}
+    assert [route[0]["model"] for route in seen] == ["old-vision", "new-vision"]
+
+
+@pytest.mark.asyncio
+async def test_offline_qc_retry_blocks_changed_candidate(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    approved = approve_with_plan(client, project)
+    job = workflow.enqueue(approved["id"], "reference", "lin")
+
+    async def generate(kind, saved, prompt, refs=(), **kwargs):
+        if kind == "image":
+            (workflow.store.media / "offline.png").write_bytes(b"original candidate")
+            return {"file": "offline.png", "mime": "image/png", "metadata": {"aspect_matches": True}}
+        raise ProviderFailure("CLOUD_REJECTED", "offline model unavailable")
+
+    monkeypatch.setattr(workflow.providers, "generate", generate)
+    await workflow.execute(job)
+    (workflow.store.media / "offline.png").write_bytes(b"modified candidate")
+    response = client.post(f"/api/jobs/{job['id']}/retry")
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CANDIDATE_CHANGED"
+    assert workflow.store.job(job["id"])["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_offline_provider_uses_recovery_route_only_for_vision(app, client, project, monkeypatch):
+    workflow = app.state.workflow
+    settings = RoutingSettings.model_validate({
+        "allow_paid": True, "image_qc_budget_cny": 1,
+        "vision": [{"transport": "cloud", "provider": "cloud", "model": "old-vision",
+                    "base_url": "https://vision.example/v1", "api_key": "offline", "qc_max_cost_cny": 0.1}],
+    })
+    workflow.settings.save(settings)
+    approved = approve_with_plan(client, project)
+    job = workflow.enqueue(approved["id"], "reference", "lin")
+    settings.vision[0].model = "new-vision"
+    workflow.settings.save(settings)
+    job["runtime"]["vision_recovery_routes"] = [
+        {k: v for k, v in r.items() if k != "configured"} for r in workflow.settings.public(settings)["vision"]
+    ]
+    workflow.store.save_job(job)
+    image = workflow.store.media / "offline.png"
+    image.write_bytes((Path(__file__).parent / "fixtures/reference.png").read_bytes())
+    models = []
+
+    def handler(request):
+        models.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": qc()}}]})
+
+    monkeypatch.setattr(workflow.providers.client, "_transport", httpx.MockTransport(handler))
+    await workflow.providers.generate("vision", job, "offline visual check", [image])
+    assert models == ["new-vision"]
+    assert job["snapshot"]["routes"]["vision"][0]["model"] == "old-vision"
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,28 @@ async function save() {
   catch (e: any) { error.value = e.message; }
   finally { busy.value = false; }
 }
+async function importRecording(speaker: string, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  busy.value = true; error.value = "";
+  try {
+    const form = new FormData();
+    form.append("stage", "recording");
+    form.append("entity_id", speaker);
+    form.append("file", file);
+    const response = await fetch(`/api/projects/${props.project.id}/upload`, { method: "POST", body: form });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error?.message || "原录音导入失败");
+    await api(`/artifacts/${result.id}/review`, "POST", {
+      approved: true, expected_review: "pending", note: "选择并确认已有原录音",
+    });
+    voices.value[speaker].recording_artifact_id = result.id;
+    await props.reload();
+    emit("notify", "已导入并确认原录音；请保存角色配音绑定。逐镜配音仍在视频完成后处理。");
+  } catch (e: any) { error.value = e.message; }
+  finally { input.value = ""; busy.value = false; }
+}
 async function audition(speaker: string) {
   const shot = sampleShot(speaker);
   if (!shot) return;
@@ -116,8 +138,12 @@ async function audition(speaker: string) {
           <label v-if="voices[role.id].source === 'recording'" class="field">{{ role.name }}使用哪段已有录音？
             <select v-model="voices[role.id].recording_artifact_id">
               <option :value="undefined">沿用已确认的角色原音轨</option>
-              <option v-for="item in project.artifacts.filter(a => a.kind === 'audio' && a.review === 'approved')" :key="item.id" :value="item.id">{{ item.title || item.entity_id }} · 已确认录音</option>
+              <option v-for="item in project.artifacts.filter(a => (a.kind === 'audio' || (a.kind === 'recording' && a.entity_id === role.id)) && a.review === 'approved' && !a.stale && !a.archived)" :key="item.id" :value="item.id">{{ item.title || item.entity_id }} · 已确认录音</option>
             </select>
+          </label>
+          <label v-if="voices[role.id].source === 'recording' && role.id !== 'narrator'" class="field">
+            导入并确认已有原录音
+            <input type="file" accept="audio/*" :disabled="busy" @change="importRecording(role.id, $event)" />
           </label>
           <template v-if="voices[role.id].source !== 'recording'">
           <label v-if="library.length || voices[role.id].library_id" class="field">{{ role.name }}复用资源库音色

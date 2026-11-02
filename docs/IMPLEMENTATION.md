@@ -1,5 +1,21 @@
 # FrameWeave implementation plan
 
+## Image QC recovery and project limits
+
+Image QC recovery keeps a generated candidate and the immutable original job snapshot. An explicit retry verifies the candidate's SHA-256, records the newly selected vision routes separately without credentials and retries only QC. Older candidates lacking a stored hash may be recovered only when a durable base64 image receipt confirms their bytes. Unknown submissions and stale inputs remain blocked. Projects whose approved contract requires stopping after the configured image attempts can enable `stop_on_image_qc_exhaustion`; this per-project setting is visible in the workspace and saved in subsequent task snapshots. Offline tests cover recovery, changed candidates and bounded retries, not live model quality or billing.
+
+The general settings page reads a public snapshot before saving and sends an `If-Match` revision. It applies only changed capability sections and rejects a stale section, so saving a vision route cannot silently restore an older image or audio route. The opaque revision changes even when only a write-only credential changes; credentials remain local and are never returned.
+
+## Existing recording inputs
+
+The upload endpoint accepts a separate `recording` source for a character after the contract and plan are approved, including while a project is paused. It validates the audio locally and snapshots the contract, reference bindings and effective pipeline rules without treating the import as generated shot audio. The user's explicit confirmation approves the source only; casting binds it to the same project and role, while the post-video audio job still creates and checks each shot's audio. Source SHA-256 is verified on reuse, and modified, archived, cross-project and cross-role recordings are rejected. Original recordings remain selectable across storyboard revisions; all downstream audio retains its ordinary version and dependency invalidation. No voice design or synthesis is involved.
+
+## Explicit Seedream image route
+
+The image policy can choose `volcengine-seedream` directly at the fixed Ark Beijing origin. Text-to-image and reference-image generation use the provider's `images/generations` JSON shape; every approved local reference is sent as a data URL, with limits checked before submission and no silent omission. The existing cloud receipt and unknown-submission protections apply. Provider-reported image counts are retained when present, and costs remain unknown without verified billing. The independent image-capable vision route still performs QC. Offline protocol fixtures do not demonstrate live generation, account balance or visual quality.
+
+When an approved contract contains an explicit reference policy, full automation no longer bootstraps a missing master by text alone. It can complete derivatives of existing approved masters; once those are handled, missing independent masters produce `REFERENCE_MASTER_REQUIRED`. Projects without an explicit policy retain their existing automatic master behavior.
+
 MiniMax synchronous speech uses fixed `api.minimaxi.com/v1/t2a_v2` with `speech-2.8-turbo` by default. It checks HTTP and business status, decodes completed hex MP3 responses and saves private receipts before validation. Unknown submissions never automatically retry. The write-only audio route holds the key, redirects are not followed, and schema errors omit request inputs. Project casting binds character/narrator voice profiles to speaking shots, with original-line auditions. Snapshots retain the full approved contract and reference bindings. Audio fingerprints invalidate affected audio/renders on voice changes while retaining approved visuals. Offline tests do not establish real MiniMax quality or account availability.
 
 MiniMax error messages retain the HTTP status and an allowlisted response-header support ID, excluding the saved key and raw response text. Balance error 1008 has a specific explanation. These diagnostics do not resolve an earlier uncertain submission; synchronous speech has no documented request-result lookup, and no new synthesis is submitted during diagnostics.

@@ -73,3 +73,11 @@ class SettingsStore:
 
     def fingerprint(self):
         return digest(self.get().model_dump())
+
+    def revision(self):
+        """Opaque file revision, including changes to write-only fields."""
+        try:
+            state = self.path.stat()
+        except FileNotFoundError:
+            return digest("settings-not-yet-saved")
+        return digest(f"{state.st_ino}:{state.st_mtime_ns}:{state.st_size}")

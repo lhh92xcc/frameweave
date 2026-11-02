@@ -213,7 +213,7 @@ class ReferenceGuard:
             return requested or "general"
         rules = self.policy.assets[entity_id]
         role = requested
-        if self.project.get("production_mode") == "full":
+        if self.project.get("production_mode") == "full" and not self.explicit:
             master = self.canonical(entity_id)
             if not master and not self.has_previous_reference(entity_id):
                 if role is None or role == rules.required_roles[0]:

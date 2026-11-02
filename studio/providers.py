@@ -164,7 +164,12 @@ class Providers:
                 raise ProviderFailure("SUBMISSION_UNKNOWN", "上一次云模型调用结果不明，请先核对供应商记录")
             self.checkpoint(job, active_call=call_key, route_index=0, remote_id=None, remote_kind=None)
         settings = self.settings.get()
-        routes = [Route.model_validate(r) for r in job["snapshot"]["routes"][kind]]
+        route_data = job["snapshot"]["routes"][kind]
+        # An explicit retry may use a new vision route for an already generated
+        # candidate. Preserve the original generation snapshot unchanged.
+        if kind == "vision" and job["stage"] in {"reference", "keyframe"}:
+            route_data = job["runtime"].get("vision_recovery_routes", route_data)
+        routes = [Route.model_validate(r) for r in route_data]
         allow_paid = job["snapshot"]["allow_paid"]
         last = None
         for index, saved in enumerate(routes):
@@ -255,6 +260,7 @@ class Providers:
                                 image.verify()
                             with Image.open(io.BytesIO(raw)) as image:
                                 result["metadata"] = {
+                                    **result.get("metadata", {}),
                                     "width": image.width,
                                     "height": image.height,
                                     "format": image.format,
@@ -480,6 +486,8 @@ class Providers:
         raise ProviderFailure("POLL_TIMEOUT", "任务仍未结束，已保存上游任务 ID；稍后重试继续查询，不重复提交")
 
     async def cloud_generate(self, kind, job, route, prompt, refs, ratio):
+        if route.provider == "volcengine-seedream" and route.base_url != "https://ark.cn-beijing.volces.com/api/v3":
+            raise ProviderFailure("SEEDREAM_ORIGIN", "Seedream 必须使用火山方舟官方地址")
         if not route.api_key or not route.base_url:
             raise ProviderFailure("CLOUD_NOT_CONFIGURED", "云模型缺少 API Key 或服务地址", True)
         receipt_dir = self.store.root / "receipts"
@@ -494,6 +502,8 @@ class Providers:
                 "VIDEO_PROTOCOL", "官方视频模型请通过 Web2API 视频连接器配置其 API Key", True
             )
         headers = {"Authorization": "Bearer " + route.api_key}
+        if route.provider == "volcengine-seedream" and kind != "image":
+            raise ProviderFailure("SEEDREAM_CAPABILITY", "Seedream 图片渠道不能用于文字、视觉质检或视频")
         if kind == "text":
             path = "/chat/completions"
             content = prompt
@@ -512,6 +522,32 @@ class Providers:
                     "temperature": 0.4,
                 }
             }
+        elif route.provider == "volcengine-seedream":
+            if len(refs) > 10:
+                raise ProviderFailure("TOO_MANY_REFERENCES", "Seedream 最多接收 10 张参考图片；不会丢弃绑定")
+            images = []
+            for ref in refs:
+                try:
+                    raw = ref.read_bytes()
+                    if len(raw) > 30 * 1024 * 1024:
+                        raise ValueError("reference too large")
+                    with Image.open(ref) as image:
+                        if image.format not in {"PNG", "JPEG", "WEBP"} or max(image.size) > 6000:
+                            raise ValueError("unsupported reference")
+                        mime = Image.MIME[image.format]
+                        image.verify()
+                except (OSError, ValueError, KeyError) as exc:
+                    raise ProviderFailure(
+                        "SEEDREAM_REFERENCE_INVALID", "Seedream 参考图不可读或超过 30MB / 6000 像素；未提交生成"
+                    ) from exc
+                images.append(f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}")
+            payload = {
+                "model": route.model, "prompt": prompt, "response_format": "b64_json", "watermark": False,
+                "size": {"9:16": "1080x1920", "16:9": "1920x1080", "1:1": "1536x1536"}[ratio],
+            }
+            if images:
+                payload["image"] = images[0] if len(images) == 1 else images
+            path, kwargs = "/images/generations", {"json": payload}
         elif refs:
             path = "/images/edits"
             kwargs = {
@@ -584,7 +620,13 @@ class Providers:
                 # Never forward the model's Bearer token to an output CDN.
                 raw, mime = await self.download(urljoin(route.base_url + "/", item["url"]))
             self.checkpoint(job, cloud_submitting=False)
-            return {"content": raw, "mime": mime}
+            usage = body.get("usage") or {}
+            count = usage.get("generated_images") if isinstance(usage, dict) else None
+            metadata = {"provider_usage": {"generated_images": count}} if (
+                route.provider == "volcengine-seedream" and isinstance(count, int)
+                and not isinstance(count, bool) and count >= 0
+            ) else {}
+            return {"content": raw, "mime": mime, "metadata": metadata}
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise ProviderFailure("INVALID_RESPONSE", "模型响应不符合接口协议，已保留提交记录") from exc
 

@@ -28,7 +28,7 @@ MiniMax 配音使用 `audio_mode: "cloud"`、`audio.provider: "minimax"`、`audi
 | `GET /api/jobs/{id}/image-attempts/{number}` | 读取该任务已生成的候选图，包括尚未完成初检的候选；不代表素材已批准 |
 | `POST /api/projects/{id}/automation` | 开关自动推进：`{enabled}` |
 | `POST /api/projects/{id}/pause`、`resume`、`cancel` | 项目控制；暂停不杀供应商调用 |
-| `POST /api/projects/{id}/upload` | multipart：`stage`、`entity_id`、`file`；导入待审核素材。用户上传的 `reference` 可在规范/蓝图批准前导入，但仍不能审核或触发下游生成 |
+| `POST /api/projects/{id}/upload` | multipart：`stage`、`entity_id`、`file`；导入待审核素材。用户上传的 `reference` 可在规范/蓝图批准前导入，但仍不能审核或触发下游生成；`recording` 导入角色已有原录音，不生成逐镜配音 |
 | `GET /api/projects/{id}/export.zip` | 原文、规范、计划、请求快照、结果资料 |
 | `GET /api/jobs`、`GET /api/jobs/{id}` | 队列、日志、完整提示词与远端 ID |
 | `POST /api/jobs/{id}/cancel`、`retry` | 取消 / 继续查询 / 显式重试 |
@@ -39,7 +39,7 @@ MiniMax 配音使用 `audio_mode: "cloud"`、`audio.provider: "minimax"`、`audi
 | `POST /api/storage/test` | 小对象上传/读回与生命周期规则只读检查 |
 | `POST /api/artifacts/{id}/review` | `{approved, note}`；旧版本不可批准 |
 | `PUT /api/artifacts/{id}/reference-role` | 分类当前版本参考图，变更分类后须重新人工审核，已有下游审核失效 |
-| `GET/PUT /api/settings` | 模型渠道、付费开关、声音与字幕 |
+| `GET/PUT /api/settings` | 模型渠道、付费开关、声音与字幕；保存可带 `If-Match`，与 `GET /api/settings/snapshot` 的不含密钥修订标识配合，避免旧设置页覆盖另一处更新 |
 | `GET /api/audio/minimax/voices` | 使用已保存的 Key 读取账号可用音色，不生成语音 |
 | `GET /api/audio/voice-library` | 本地只读、全局已锁定音色库；返回原 ID、参数、激活状态和试听地址，不调用供应商 |
 | `GET /api/audio/voice-library/{id}/preview` | 校验 SHA-256 后播放已保存试听，不生成音频 |
@@ -54,7 +54,13 @@ Gemini 账号通过 `POST /api/gateway/accounts` 添加，`PUT /api/gateway/acco
 
 `GET/PUT/DELETE /api/gateway/seedream` 直接同步网关配置；PUT 接收 `api_key`，返回值仅包含配置状态、模型、固定服务地址和参考价格，不返回密钥，密钥只存网关。已配置不表示已验证。网关原生兜底针对至少两个启用的 Gemini 账号本次均确认额度耗尽；工作台另支持所有启用账号（至少两个）均认证失效时兜底，仅对任务快照允许付费的图片请求生效。超时、其他错误或结果不明确不会触发认证兜底。工作台关闭付费时已配置网关兜底会拒绝 Gemini 图片请求；成功兜底记录实际模型及付费属性，Seedream 失败需先核对账单与供应商记录。
 
+图片策略还可显式配置独立的方舟直连：`transport: cloud`、`provider: volcengine-seedream`、`base_url: https://ark.cn-beijing.volces.com/api/v3`，并填写模型和写入式 Key。此渠道不依赖 Gemini 兜底，按项目授权计费；参考图全部以实际文件传入 `images/generations`，最多 10 张，每张不超过 30 MB、最长边不超过 6000 像素。请求前不符合限制时停止，不丢弃参考。供应商结果不明保留提交状态，不能自动重复提交；返回用量只记录供应商实际提供的数据。它只做图片生成，视觉质检仍需单独配置能够读取图片的模型。
+
+图片已生成但质检渠道明确失败时，可更新视觉渠道并重试原任务：工作台核验候选文件哈希，沿用原图片和完整生产快照，单独记录新旧质检渠道与恢复时间；不会重复调用生图模型。旧任务缺少候选哈希时，仅在本地原始回执可证明图片字节一致时恢复。结果不明、原参考失效或文件变化仍会阻止重试。`POST /api/projects/{id}/automation` 可选 `stop_on_image_qc_exhaustion: true`，使该项目达到图片质检次数上限后停止，适用于获批规范要求耗尽即停的项目；省略时保留当前项目设置，不改变其他项目。
+
 阶段 `stage`：`requirements`、`plan`、`reference`、`keyframe`、`video`、`audio`、`render`。模型生成的图片/视频阶段要求规范与分镜批准；用户上传的 `reference` 是唯一例外，只要已有匹配当前规范的分镜即可导入，但必须等待规范和分镜批准后审核；关键帧要求引用素材批准；视频要求关键帧批准；合成要求全部输入视频及独立配音批准。
+
+上传阶段还接受 `recording`：`entity_id` 为当前角色 ID，规范和分镜必须已批准，项目暂停时也可导入。服务解码并记录文件 SHA-256、规范和流水线快照，原录音初始待审核；确认后可在角色配音中绑定。它只是可复用的来源素材，不增加逐镜配音进度、不调用 TTS，也不会绕过先完成视频的生产顺序。原录音属于角色和项目，不随分镜编辑替换；每次使用验证原文件哈希，派生音轨仍随分镜和依赖变化失效。拒绝缺失、归档、跨项目、跨角色或被修改的原录音。
 
 所有项目默认锁定每个资产的母版，`reference_source_id` 只能指定当前已批准的独立母版，不能用派生图重定身份。不指定时复用已锁定母版；首张母版可从规范生成，待人工确认。后续生成携带实际文件、审核版本和 SHA-256；派生参考图与关键帧通过完整规范及逐资产检查后自动批准。新候选不会自动替换母版，明确切换使用 `assets/{asset_id}/master`，且不能恢复旧下游批准。规范或分镜修改后必须重新确认素材。
 

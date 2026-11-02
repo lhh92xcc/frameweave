@@ -236,6 +236,11 @@ class RoutingSettings(StrictModel):
                 route.transport != "cloud" or route.base_url != "https://ark.cn-beijing.volces.com/api/v3"
             ):
                 raise ValueError("豆包方舟必须使用官方北京 API 地址")
+        for route in [*self.text, *self.image, *self.vision, *self.video]:
+            if route.provider == "volcengine-seedream" and (
+                route.transport != "cloud" or route.base_url != "https://ark.cn-beijing.volces.com/api/v3"
+            ):
+                raise ValueError("Seedream 必须使用火山方舟官方北京 API 地址")
         return self
 
 
@@ -277,6 +282,7 @@ class RunRequest(StrictModel):
     enabled: bool = True
     mode: Literal["manual", "full"] | None = None
     unlimited_budget: bool = False
+    stop_on_image_qc_exhaustion: bool | None = None
 
     @model_validator(mode="after")
     def full_authorization(self):

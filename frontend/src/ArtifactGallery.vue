@@ -71,7 +71,7 @@ const mediaShortcuts = computed(() => [
     title: "查找配音与录音",
     description: "台词、旁白和已有猫叫录音",
     icon: "audio",
-    count: available.value.filter((a) => a.kind === "audio").length,
+    count: available.value.filter((a) => ["audio", "recording"].includes(a.kind)).length,
   },
 ]);
 const selectedProject = computed(() =>
@@ -164,7 +164,8 @@ const filtered = computed(() =>
             : a.metadata?.curation?.state === scope.value)) &&
         (!episodeFilter.value ||
           a.metadata?.curation?.episode === episodeFilter.value) &&
-        (filter.value === "all" || a.kind === filter.value) &&
+        (filter.value === "all" || a.kind === filter.value ||
+          (filter.value === "audio" && a.kind === "recording")) &&
         (reviewFilter.value === "all" ||
           (a.review === reviewFilter.value && !a.archived)) &&
         (!projectFilter.value || a.project_id === projectFilter.value) &&

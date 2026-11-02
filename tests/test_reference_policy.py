@@ -87,6 +87,24 @@ def test_offline_missing_master_and_pending_master_never_enqueue(client, project
     assert snapshot["reference_manifest"][0]["sha256"] == hash_bytes(png("red")).hexdigest()
 
 
+def test_full_automation_obeys_explicit_no_master_no_text_generation(app, client, project):
+    p = strict_project(client, project)
+    assert client.post(f"/api/projects/{p['id']}/automation", json={
+        "enabled": True, "mode": "full", "unlimited_budget": True,
+    }).status_code == 200
+    w = app.state.workflow
+    p = w.store.project(p["id"])
+    assert w.automation_state(p)["error"]["code"] == "REFERENCE_MASTER_REQUIRED"
+    with pytest.raises(ValueError):
+        w.enqueue(p["id"], "reference", "lin", reference_role="front")
+    source = upload(client, p, "front")
+    state = w.automation_state(w.store.project(p["id"]))
+    assert state["state"] == "scheduling" and state["stage"] == "reference"
+    job = w.enqueue(p["id"], "reference", "lin")
+    assert job["snapshot"]["dependencies"] == [source["id"]]
+    assert job["snapshot"]["reference_role"] == "side"
+
+
 def test_offline_required_views_and_duplicate_files_block_keyframes(app, client, project):
     p = strict_project(client, project)
     w = app.state.workflow

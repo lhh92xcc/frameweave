@@ -193,6 +193,31 @@ def test_saved_settings_are_write_only_and_origin_scoped(client, app):
     )
 
 
+def test_offline_settings_revision_blocks_stale_strategy_overwrite(client, app):
+    settings = app.state.workflow.settings.get()
+    settings.audio.api_key = "offline-private-key"
+    app.state.workflow.settings.save(settings)
+    snapshot = client.get("/api/settings/snapshot").json()
+    assert "offline-private-key" not in json.dumps(snapshot)
+    changed = app.state.workflow.settings.get()
+    changed.image[0].model = "new-image-route"
+    app.state.workflow.settings.save(changed)
+    stale = snapshot["settings"]
+    for kind in ["text", "image", "vision", "video", "audio"]:
+        for route in [stale[kind]] if kind == "audio" else stale[kind]:
+            route.pop("configured", None)
+    stale["moderation"].pop("configured", None)
+    response = client.put("/api/settings", json=stale, headers={"If-Match": snapshot["revision"]})
+    assert response.status_code == 409
+    assert app.state.workflow.settings.get().image[0].model == "new-image-route"
+    assert app.state.workflow.settings.get().audio.api_key == "offline-private-key"
+    snapshot = client.get("/api/settings/snapshot").json()
+    current = app.state.workflow.settings.get()
+    current.audio.api_key = "another-offline-private-key"
+    app.state.workflow.settings.save(current)
+    assert client.get("/api/settings/snapshot").json()["revision"] != snapshot["revision"]
+
+
 def test_prompt_exact_contract_and_export_no_settings(app, client, project):
     p = approve_with_plan(client, project)
     w = app.state.workflow
