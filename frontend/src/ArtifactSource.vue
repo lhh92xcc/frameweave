@@ -27,11 +27,39 @@ const model = computed(() => {
 const paid = computed(() =>
   !props.artifact.archived && route.value.provider !== "user-upload" && route.value.paid === true,
 );
+
+const costText = computed(() => {
+  if (props.artifact.archived || route.value.provider === "user-upload") return "";
+  const billing = props.artifact.metadata?.billing;
+  if (billing?.estimated_cost != null) {
+    return `${billing.estimated_cost} ${billing.currency || "CNY"}`;
+  }
+  if (billing?.credits != null) {
+    return `${billing.credits} 积分`;
+  }
+  const provider = route.value.provider || "";
+  const modelName = route.value.model || "";
+  if (provider.includes("seedream") || modelName.includes("seedream")) {
+    return "0.12 CNY";
+  }
+  if (provider.includes("vidu") || modelName.includes("vidu")) {
+    const dur = props.artifact.metadata?.duration_seconds;
+    if (dur) {
+      return `约 ${(dur * 0.08).toFixed(2)} CNY`;
+    }
+    return "约 0.24 CNY";
+  }
+  if (provider === "minimax" && props.artifact.kind === "audio") {
+    return "0.00 CNY (免费母版复用)";
+  }
+  return "";
+});
 </script>
 
 <template>
   <div class="artifact-source" aria-label="素材生成来源">
     <span><strong>来源：</strong>{{ source }}<template v-if="paid"> · 付费</template></span>
     <span v-if="model" class="artifact-source-model"><strong>记录模型：</strong>{{ model }}</span>
+    <span v-if="costText" class="artifact-source-cost"><strong>生成费用：</strong>{{ costText }}</span>
   </div>
 </template>

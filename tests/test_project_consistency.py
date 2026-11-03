@@ -186,6 +186,35 @@ async def test_offline_human_rework_retains_notes_budget_and_total_attempt_limit
     assert "修正道具位置 1" in calls[-2][1] and "修正道具位置 2" in calls[-2][1]
 
 
+def test_offline_manual_rejection_preserves_uncertain_qc_and_prior_cost(app, client, project):
+    p = approve_with_plan(client, project)
+    w = app.state.workflow
+    original = upload(client, p)
+    approve(client, original)
+    job = w.enqueue(p["id"], "keyframe", "ep1_s01")
+    candidate_id = "art_" + "a" * 20
+    filename = candidate_id + ".png"
+    (w.store.media / filename).write_bytes(b"offline rejected image fixture")
+    job.update(status="blocked", error={"code": "SUBMISSION_UNKNOWN", "message": "offline uncertain vision"})
+    job["runtime"].update(cloud_submitting=True, qc_cost_reservations={"image": 0.12, "vision": 0.05})
+    w.store.save_job(job)
+    artifact = w.save_output(job, candidate_id, {
+        "file": filename, "mime": "image/png", "metadata": {"manual_qc_attempts_used": 1},
+        "route": {"provider": "offline-fixture", "paid": True},
+    })
+    assert artifact["review"] == "pending"
+    reviewed = client.post(f"/api/artifacts/{candidate_id}/review", json={
+        "approved": False, "note": "重复道具，动作提前发生",
+    }).json()
+    next_job = w.store.job(reviewed["rework_job_id"])
+    assert next_job["snapshot"]["rework"]["attempts_used"] == 1
+    assert next_job["snapshot"]["rework"]["cost_reservations"] == {"image": 0.12, "vision": 0.05}
+    assert next_job["snapshot"]["rework"]["notes"] == ["重复道具，动作提前发生"]
+    prior = w.store.job(job["id"])
+    assert prior["status"] == "blocked" and prior["runtime"]["cloud_submitting"]
+    assert prior["error"]["code"] == "SUBMISSION_UNKNOWN"
+
+
 def test_offline_contract_revision_clears_master_binding_without_reviving_old_approval(app, client, project):
     p = approve_with_plan(client, project)
     original = upload(client, p)

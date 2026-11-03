@@ -26,7 +26,7 @@ class ViduRules(RuleModel):
     resolution: Literal["720p", "1080p"] = Field(default="720p", title="生成分辨率")
     reference_max_seconds: float = Field(default=5, gt=0, le=5, title="视频参考最长秒数（供应商上限 5 秒）")
     reference_max_mb: int = Field(default=100, ge=1, le=100, title="视频参考最大 MB（上限 100 MB）")
-    poll_protocol: Literal["post_task_get", "get_tasks"] = Field(default="post_task_get", title="查询协议（文档默认 POST task/get；旧适配 GET tasks/id）")
+    poll_protocol: Literal["post_task_get", "get_tasks"] = Field(default="post_task_get", title="查询协议（用户原规范为 POST；腾讯当前文档为 GET tasks/id）")
     poll_seconds: float = Field(default=5, ge=1, le=60, title="任务查询间隔（秒）")
     poll_limit: int = Field(default=720, ge=1, le=17280, title="单轮最大查询次数")
 
@@ -101,5 +101,5 @@ def public_rules(settings):
     return {"rules": settings.pipeline.model_dump(), "defaults": PipelineRules().model_dump(),
             "revision": settings.pipeline_revision, "schema": PipelineRules.model_json_schema(),
             "stages": STAGES,
-            "hard_limits": ["视频参考只能 Q2-Pro；Q2 最长 10 秒、Q3 最长 16 秒", "audio 与 bgm 互斥，Q2 不接受 audio/audio_type，Q3 不接受 bgm/videos", "不得删除实际参考素材来绕过硬限制", "保留锁定三个人声与猫叫，禁止新建定制声音；缺失音色停止", "提交结果不明先核对，不重复扣费", "实际价格、积分和模型能力须以供应商为准；查询协议尚需真实账号验证"],
+            "hard_limits": ["视频参考只能 Q2-Pro；Q2 最长 10 秒、Q3 最长 16 秒", "audio 与 bgm 互斥，Q2 不接受 audio/audio_type，Q3 不接受 bgm/videos", "TokenHub 当前文档要求提示词不超过 5000 字符，并限制参考主体和模型；不截断规范或丢弃参考", "新 TokenHub 任务须使用当前文档的 GET tasks/id 查询；已有任务保留原查询方式", "保留锁定三个人声与猫叫，禁止新建定制声音；缺失音色停止", "提交结果不明先核对，不重复扣费", "实际价格、积分和模型能力须以供应商为准；真实账号接受情况尚未验证"],
             "precedence": "接口能力和固定音色限制 → 已批准项目规范 → 结构化规则 → 分镜偏好。文字说明供规划及审核；改变执行参数请同时修改对应表单。"}

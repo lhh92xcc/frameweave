@@ -61,7 +61,8 @@ def validate_payload(body):
     if set(body) - allowed:
         raise ValueError("请求包含该模型不支持的字段")
     for subject in body.get("subjects", []):
-        if not isinstance(subject, dict) or set(subject) - {"id", "images", "videos"}:
+        if (not isinstance(subject, dict) or set(subject) - {"name", "images", "videos"}
+                or not isinstance(subject.get("name"), str) or not subject["name"]):
             raise ValueError("主体参考字段无效")
         if "videos" in subject and model != "vidu-video-q2-pro":
             raise ValueError("仅 Q2-Pro 接受 videos 字段")

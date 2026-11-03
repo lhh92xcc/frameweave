@@ -784,11 +784,12 @@ class Workflow(AutoProduction):
         try:
             original = self.store.job(artifact["job_id"])
             prior = original.get("snapshot", {}).get("rework", {})
-            qc = artifact.get("metadata", {}).get("visual_qc", {})
+            metadata = artifact.get("metadata", {})
+            qc = metadata.get("visual_qc", {})
             history = [*prior.get("notes", []), artifact.get("review_note") or "人工复核未通过，请重新检查全部要求"]
             rework = {
                 "artifact_id": artifact["id"], "review_version": artifact.get("review_version", 0),
-                "notes": history, "attempts_used": qc.get("total_attempts", 0),
+                "notes": history, "attempts_used": max(qc.get("total_attempts", 0), metadata.get("manual_qc_attempts_used", 0)),
                 "cost_reservations": original.get("runtime", {}).get("qc_cost_reservations", {}),
             }
             job = self.enqueue(artifact["project_id"], artifact["kind"], artifact["entity_id"], force=True,
@@ -1494,7 +1495,18 @@ class Workflow(AutoProduction):
                 f"\n{entity['image_prompt']}\n本镜内容：{entity['description']}"
             )
         else:
-            instruction = f"从已批准首帧生成真实动态视频，保持身份与空间连续。时长 {entity['duration']} 秒。\n{entity['video_prompt']}\n对白：{entity['dialogue']}\n旁白：{entity['narration']}"
+            video_prompt = entity["video_prompt"]
+            if entity.get("dialogue"):
+                video_prompt = video_prompt.replace(f"“{entity['dialogue']}”", "（进行日常口语交流，画面严禁出现字幕）")
+                video_prompt = video_prompt.replace(f'"{entity["dialogue"]}"', "（进行日常口语交流，画面严禁出现字幕）")
+                video_prompt = video_prompt.replace(entity["dialogue"], "（进行日常口语交流，画面严禁出现字幕）")
+            instruction = (
+                f"从已批准首帧生成真实动态视频，保持身份与空间连续。时长 {entity['duration']} 秒。"
+                "纯净原始画面，严禁生成任何字幕、文字或台词水印，文字一律由后期压制；画面全程保持纯净无字，仅展现角色自然动作与口型神态。"
+                f"\n{video_prompt}"
+            )
+            if entity.get("narration"):
+                instruction += f"\n旁白参考（仅供氛围参考，禁止在画面生成文字）：{entity['narration']}"
         prompt = self.prompt(
             s,
             instruction

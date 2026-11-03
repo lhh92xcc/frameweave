@@ -38,7 +38,11 @@ async def request(provider, route, method, path, payload=None):
             raise ValueError("redirect")
         return unpack(response.json())
     except (httpx.HTTPError, ValueError, TypeError) as exc:
-        raise ProviderFailure("TOKENHUB_REQUEST_FAILED", "TokenHub 未返回有效结果；提交结果不明请先核对，已有任务可重试查询") from exc
+        detail = str(exc)
+        if isinstance(exc, httpx.HTTPStatusError):
+            detail = f"{exc.response.status_code}: {exc.response.text}"
+        print(f"TokenHub error: {detail}", flush=True)
+        raise ProviderFailure("TOKENHUB_REQUEST_FAILED", f"TokenHub 未返回有效结果 ({detail})；提交结果不明请先核对，已有任务可重试查询") from exc
 
 
 async def generate(provider, job, route, prompt, refs, duration):
@@ -64,10 +68,32 @@ async def generate(provider, job, route, prompt, refs, duration):
         raise ProviderFailure("TOKENHUB_POLICY", "实际素材与已批准的镜头分流快照不一致")
     if not refs:
         raise ProviderFailure("TOKENHUB_INPUT", "缺少已批准关键帧")
+    task = job["runtime"].get("tokenhub_task")
+    if task and task["call"] != job["runtime"].get("active_call"):
+        task = None
+    # Current Tencent documentation specifies GET /tasks/{id}, a 5000-character
+    # prompt and model-specific subject limits. Never alter a saved rule or
+    # truncate approved content; block before any upload or paid submission.
+    # Known and uncertain submissions must retain their original recovery path.
+    if not task and not job["runtime"].get("cloud_submitting"):
+        if len(prompt) > 5000:
+            raise ProviderFailure("TOKENHUB_PROMPT_LIMIT", "完整已批准规范超过 Vidu 5000 字符上限；未截断或提交")
+        if rules.get("poll_protocol", "get_tasks") != "get_tasks":
+            raise ProviderFailure("TOKENHUB_POLL_PROTOCOL", "当前 TokenHub 文档使用 GET tasks/{id} 查询；请复核已保存规则，未提交")
+        model = decision["model"]
+        if videos or len(refs) > 1:
+            if model not in {"vidu-video-q2", "vidu-video-q2-pro", "vidu-video-q3-turbo"}:
+                raise ProviderFailure("TOKENHUB_REFERENCE_MODEL", "该模型不在 TokenHub 参考生视频支持列表中；未提交")
+            limit = 4 if model == "vidu-video-q2-pro" else 7
+            if len(refs) > limit or len(videos) > 1:
+                raise ProviderFailure("TOKENHUB_REFERENCE_LIMIT", "参考主体超过模型限制；请拆镜，未丢弃参考或提交")
+        elif model not in {"vidu-video-q2-turbo", "vidu-video-q2-pro", "vidu-video-q3-turbo", "vidu-video-q3-pro"}:
+            raise ProviderFailure("TOKENHUB_IMAGE_MODEL", "TokenHub 图生视频接口不支持该模型；未提交")
     for path in refs:
         try:
             with Image.open(path) as image:
-                if image.format not in {"PNG", "JPEG", "WEBP"}:
+                if (image.format not in {"PNG", "JPEG", "WEBP"} or path.stat().st_size > 50 * 1024 * 1024
+                        or not 0.25 <= image.width / image.height <= 4):
                     raise ValueError("unsupported image")
         except (OSError, ValueError) as exc:
             raise ProviderFailure("TOKENHUB_IMAGE", "TokenHub 图片需为 PNG、JPEG 或 WebP") from exc
@@ -80,15 +106,12 @@ async def generate(provider, job, route, prompt, refs, duration):
         path = (provider.store.media / item["file"]).resolve()
         if not path.is_relative_to(provider.store.media.resolve()) or not path.is_file():
             raise ProviderFailure("TOKENHUB_INPUT", "视频参考文件无效")
-        if path.suffix.lower() != ".mp4" or path.stat().st_size > rules.get("reference_max_mb", 100) * 1024 * 1024:
-            raise ProviderFailure("TOKENHUB_INPUT", "视频参考必须为 MP4，且大小不能超过规则上限")
+        if path.suffix.lower() != ".mp4" or path.stat().st_size > min(rules.get("reference_max_mb", 100), 20) * 1024 * 1024:
+            raise ProviderFailure("TOKENHUB_INPUT", "视频参考必须为 MP4，且大小不能超过规则或供应商 20 MB 上限")
         metadata = await provider.engine_request("/validate", {"file": item["file"]})
         if not 0 < metadata.get("duration_seconds", 0) <= rules.get("reference_max_seconds", 5):
             raise ProviderFailure("TOKENHUB_INPUT", "视频参考超过规则时长上限；未截断原参考或提交")
 
-    task = job["runtime"].get("tokenhub_task")
-    if task and task["call"] != job["runtime"]["active_call"]:
-        task = None
     if task and task.get("decision") is not None and task["decision"] != decision:
         raise ProviderFailure("TOKENHUB_POLICY", "已提交任务的分流决策发生变化，禁止自动重新提交")
     if not task:
@@ -114,9 +137,9 @@ async def generate(provider, job, route, prompt, refs, duration):
             payload["audio"] = decision["audio"]
         if videos or len(refs) > 1:
             path = "/v1/wand/vidu/reference-to-video"
-            payload["subjects"] = [{"id": f"reference_{i + 1}", "images": [url]} for i, url in enumerate(image_urls)]
+            payload["subjects"] = [{"name": f"reference_{i + 1}", "images": [url]} for i, url in enumerate(image_urls)]
             if video_urls:
-                payload["subjects"].append({"id": "previous_video", "videos": video_urls})
+                payload["subjects"].append({"name": "previous_video", "videos": video_urls})
         else:
             path = "/v1/wand/vidu/image-to-video"
             payload["images"] = image_urls

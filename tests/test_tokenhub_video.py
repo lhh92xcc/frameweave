@@ -16,7 +16,7 @@ def route(model="vidu-video-q3-turbo"):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model", sorted(MODELS))
+@pytest.mark.parametrize("model", sorted(MODELS - {"vidu-video-q2"}))
 async def test_models_payload_resume_and_key_isolation(tmp_path, monkeypatch, model):
     frame = tmp_path / "frame.png"
     Image.new("RGB", (32, 32)).save(frame)
@@ -75,6 +75,44 @@ async def test_unknown_submission_is_not_retried(tmp_path):
     with pytest.raises(ProviderFailure) as caught:
         await generate(None, {"runtime": {"active_call": "call", "cloud_submitting": True}}, route(), "prompt", [frame], 5)
     assert caught.value.code == "SUBMISSION_UNKNOWN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,ref_count,prompt,rules,code", [
+    ("vidu-video-q3-turbo", 1, "文" * 5001, {}, "TOKENHUB_PROMPT_LIMIT"),
+    ("vidu-video-q3-turbo", 1, "完整规范", {"poll_protocol": "post_task_get"}, "TOKENHUB_POLL_PROTOCOL"),
+    ("vidu-video-q3-turbo", 8, "完整规范", {}, "TOKENHUB_REFERENCE_LIMIT"),
+    ("vidu-video-q2-pro", 5, "完整规范", {}, "TOKENHUB_REFERENCE_LIMIT"),
+    ("vidu-video-q3-pro", 2, "完整规范", {}, "TOKENHUB_REFERENCE_MODEL"),
+    ("vidu-video-q2", 1, "完整规范", {}, "TOKENHUB_IMAGE_MODEL"),
+])
+async def test_provider_contract_blocks_before_upload(model, ref_count, prompt, rules, code, tmp_path):
+    frame = tmp_path / "offline.png"
+    Image.new("RGB", (32, 32)).save(frame)
+    job = {"runtime": {"active_call": "call"}, "snapshot": {"pipeline_rules": {"vidu": rules}}}
+    with pytest.raises(ProviderFailure) as caught:
+        await generate(None, job, route(model), prompt, [frame] * ref_count, 5)
+    assert caught.value.code == code
+    assert not job["runtime"].get("cloud_submitting")
+
+
+@pytest.mark.asyncio
+async def test_known_task_with_oversize_prompt_still_resumes(tmp_path):
+    frame = tmp_path / "offline.png"
+    Image.new("RGB", (32, 32)).save(frame)
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.host == "cdn.example":
+            return httpx.Response(200, content=b"offline video fixture")
+        return httpx.Response(200, json={"state": "success", "creations": [{"url": "https://cdn.example/video.mp4"}]})
+
+    job = {"runtime": {"active_call": "call", "tokenhub_task": {"id": "existing", "call": "call"}}}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        provider = SimpleNamespace(client=client, checkpoint=lambda j, **values: j["runtime"].update(values))
+        await generate(provider, job, route(), "文" * 5001, [frame], 5)
+    assert [request.method for request in requests] == ["GET", "GET"]
 
 
 def test_retry_preserves_tokenhub_task(app, client, project):

@@ -63,9 +63,9 @@ def test_schema_defaults_and_audio_conflict():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("options,duration,video,expected,path", [
-    ({"family": "q2", "preference": "speed"}, 5, False, "vidu-video-q2-turbo", "reference-to-video"),
+    ({"family": "q2", "preference": "quality"}, 5, False, "vidu-video-q2-pro", "reference-to-video"),
     ({"audio": True}, 11, False, "vidu-video-q3-turbo", "reference-to-video"),
-    ({"bgm": True}, 5, False, "vidu-video-q2-turbo", "reference-to-video"),
+    ({"bgm": True, "preference": "budget"}, 5, False, "vidu-video-q2", "reference-to-video"),
     ({"reference_previous_video": True}, 5, True, "vidu-video-q2-pro", "reference-to-video"),
 ])
 async def test_real_payload_and_provenance(tmp_path, monkeypatch, options, duration, video, expected, path):
@@ -112,6 +112,7 @@ async def test_real_payload_and_provenance(tmp_path, monkeypatch, options, durat
     assert payload["model"] == result["actual_route"]["model"] == expected
     assert payload["prompt"] == "FULL CONTRACT"
     assert len(uploads) == (3 if video else 2)
+    assert all(subject.get("name") and "id" not in subject for subject in payload["subjects"])
     assert bool(any(s.get("videos") for s in payload["subjects"])) == video
     if expected.startswith("vidu-video-q2"):
         assert "audio" not in payload and payload["bgm"] == options.get("bgm", False)
