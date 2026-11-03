@@ -4,6 +4,8 @@
 
 Image QC recovery keeps a generated candidate and the immutable original job snapshot. An explicit retry verifies the candidate's SHA-256, records the newly selected vision routes separately without credentials and retries only QC. Older candidates lacking a stored hash may be recovered only when a durable base64 image receipt confirms their bytes. Unknown submissions and stale inputs remain blocked. Projects whose approved contract requires stopping after the configured image attempts can enable `stop_on_image_qc_exhaustion`; this per-project setting is visible in the workspace and saved in subsequent task snapshots. Offline tests cover recovery, changed candidates and bounded retries, not live model quality or billing.
 
+Vision QC normalizes a string correction or an explicit list of correction strings into text, including the provider's `{items: [...]}` wrapper. It still requires every overall and per-asset check and rejects uncertain, missing or invalid results; this formatting compatibility does not approve a candidate by itself.
+
 The general settings page reads a public snapshot before saving and sends an `If-Match` revision. It applies only changed capability sections and rejects a stale section, so saving a vision route cannot silently restore an older image or audio route. The opaque revision changes even when only a write-only credential changes; credentials remain local and are never returned.
 
 ## Existing recording inputs

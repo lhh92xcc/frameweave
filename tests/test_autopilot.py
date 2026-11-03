@@ -188,6 +188,36 @@ async def test_full_project_can_stop_after_configured_image_attempts(app, client
 
 
 @pytest.mark.asyncio
+async def test_full_rejected_reference_surfaces_retryable_rework_job(app, client, monkeypatch):
+    w = app.state.workflow
+    p = full_project(client)
+    install_offline(w, monkeypatch)
+    for _ in range(15):
+        await w.advance_safely(w.store.project(p['id']))
+        queued = [j for j in reversed(w.store.jobs(p['id'])) if j['status'] == 'queued']
+        if queued:
+            await w.execute(queued[0])
+        refs = [a for a in w.store.artifacts(p['id']) if a['kind'] == 'reference' and a.get('dependencies')]
+        if refs:
+            break
+    assert refs and refs[0]['review'] == 'approved'
+    rejected = client.post(f"/api/artifacts/{refs[0]['id']}/review", json={
+        'approved': False, 'note': 'offline correction',
+    }).json()
+    rework = w.store.job(rejected['rework_job_id'])
+    rework.update(status='blocked', finished_at=now()-1000,
+                  error={'code':'IMAGE_QC_EXHAUSTED', 'message':'offline'})
+    rework['runtime']['image_qc_attempts'] = [{'qc': {'correction': 'offline correction'}}]
+    w.store.save_job(rework)
+    p = w.store.project(p['id'])
+    state = w.automation_state(p)
+    assert state['state'] == 'retrying' and state['job_ids'] == [rework['id']]
+    await w.advance_safely(p)
+    resumed = w.store.job(rework['id'])
+    assert resumed['status'] == 'queued' and resumed['runtime']['qc_round'] == 1
+
+
+@pytest.mark.asyncio
 async def test_disable_full_mode_stops_further_calls(app, client, monkeypatch):
     w = app.state.workflow
     p = full_project(client)

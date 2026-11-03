@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from studio.autopilot import AutoProduction
 from studio.catalog import baseline_contract
@@ -60,6 +60,17 @@ class VisualQC(BaseModel):
     checks: dict[str, VisualCheck]
     asset_checks: dict[str, dict[str, VisualCheck]]
     correction: str = Field(default="", max_length=3000)
+
+    @field_validator("correction", mode="before")
+    @classmethod
+    def normalize_correction(cls, value):
+        # Vision providers sometimes wrap their proposed corrections in an
+        # items list. Normalize presentation only, never missing checks.
+        if isinstance(value, dict) and set(value) == {"items"}:
+            value = value["items"]
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return "\n".join(value)
+        return value
 
 
 QC_CHECKS = {"identity", "costume", "location", "props", "spatial_sides", "continuity", "composition", "story",
@@ -957,8 +968,18 @@ class Workflow(AutoProduction):
                 if guard.policy:
                     readiness = guard.status()
                     if any(not view["approved"] for asset in readiness["assets"].values() for view in asset["views"]):
-                        if any(guard.views(id_).get(view["role"], {}).get("review") == "rejected"
-                               for id_, asset in readiness["assets"].items() for view in asset["views"]):
+                        rejected = [guard.views(id_).get(view["role"], {})
+                                    for id_, asset in readiness["assets"].items() for view in asset["views"]
+                                    if guard.views(id_).get(view["role"], {}).get("review") == "rejected"]
+                        if rejected:
+                            # A rejected view may already have a corrective job.
+                            # Surface its actual state so retryable failures do not
+                            # leave full automation stuck forever in "rework".
+                            rework_ids = {a.get("rework_job_id") for a in rejected}
+                            stopped = [j for j in jobs if j["id"] in rework_ids
+                                       and j["status"] in {"failed", "blocked", "cancelled"}]
+                            if stopped:
+                                return self.stopped_state(p, "reference", stopped)
                             return {"state": "rework", "stage": "reference"}
                         if not guard.multiview:
                             missing = [id_ for id_, asset in readiness["assets"].items()

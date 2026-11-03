@@ -218,6 +218,26 @@ async def test_offline_qc_prompt_names_only_bound_assets(app, client, project, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("correction", [["保留母版", "删除随机字样"], {"items": ["保留母版", "删除随机字样"]}])
+async def test_offline_qc_accepts_correction_list_without_relaxing_checks(app, client, project, monkeypatch, correction):
+    workflow = app.state.workflow
+    approved = approve_with_plan(client, project)
+    job = workflow.enqueue(approved["id"], "reference", "lin")
+
+    async def generate(kind, saved, prompt, refs=(), **kwargs):
+        if kind == "image":
+            (workflow.store.media / "offline.png").write_bytes(b"offline generated candidate")
+            return {"file": "offline.png", "mime": "image/png", "metadata": {"aspect_matches": True}}
+        value = json.loads(qc())
+        value["correction"] = correction
+        return {"text": json.dumps(value, ensure_ascii=False)}
+
+    monkeypatch.setattr(workflow.providers, "generate", generate)
+    await workflow.execute(job)
+    assert workflow.store.job(job["id"])["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_offline_qc_retry_uses_new_vision_route_and_keeps_original_snapshot(app, client, project, monkeypatch):
     workflow = app.state.workflow
     initial = RoutingSettings.model_validate({
